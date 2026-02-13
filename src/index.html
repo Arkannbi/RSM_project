@@ -300,6 +300,30 @@
           return colorResponse;
         }
     </script>
+    <script type="x-shader/wgsl" id="shadow-shaders">
+      struct Uniforms {
+        modelMat : mat4x4<f32>,
+        depthMVP : mat4x4<f32>
+      };
+
+      @group(0) @binding(0)
+      var<uniform> uniforms : Uniforms;
+      
+      struct ShadowVertexInput {
+        @location(0) pos: vec3f,
+      };
+
+      struct ShadowVertexOutput {
+        @builtin(position) builtInPos : vec4f,
+      };
+
+      @vertex
+        fn shadowVertexMain(input: ShadowVertexInput) -> ShadowVertexOutput {
+          var output: ShadowVertexOutput;
+          output.builtInPos = uniforms.depthMVP * uniforms.modelMat * vec4f (input.pos, 1);
+          return output;
+        }
+    </script>
     <script type="module">
 
       // Minimal 4x4 Matrix implementaton, to be used for the Model-View-Projection matrix
@@ -1055,12 +1079,20 @@
           lightSource: {
             position: [280.0, 280.0, 0.0],
             color: [1.0, 1.0, 1.0],
+            lightViewMat: mat4Identity(),
+            lightProjMat: mat4Perspective(
+              Math.PI / 2.0,
+              1.0,
+              0.1,
+              10000.0
+            ),
           },
           //mesh: createCube(1.2),
           //mesh: createSphere(0.8, 32, 32),
           mesh: createCornellBox(),
           time: 0,
         };
+        lookAt(scene.lightSource.lightViewMat, scene.lightSource.position, [280.0, 280.0, 280.0], [0, 1, 0]);
         return scene;
       }
 
@@ -1082,22 +1114,33 @@
           meshBuffers:{},
           // GPU memory used to pass parameters from CPU to GPU, such as the camera or light properties
           uniformBuffer: {},
+          uniformBufferForShadow: {},
           // Handle on GPU parameters
           bindGroup: {},
+          bindGroupForShadow: {},
           // Handle on the GPU shaders
           shaderModule: {},
+          // Shadow code used for rendering
+          shadowShaderModule: {},
           // Organization of the input of the pipeline/vertex shader
           vertexBuffersLayout: {},
+          vertexBuffersLayoutForShadow: {},
           // Organization of the 
           bindGroupLayout: {},
+          bindGroupLayoutForShadow: {},
           // Rasterization pipeline
           rasterizationPipeline: {},
           // Ray Tracing pipeline
           rayTracingPipeline: {},
+          // Shadow pipeline
+          shadowPipeline: {},
           // Depth map used to store per-pixel depth (Z-Buffer)
           depthTexture: {},
+          // Shadow depth map
+          shadowDepthTexture: {},
           // Model/View/Inverse View/Projection matrix (16 floats each), light position (3+1 pad floats), color (3+1 pad float), fov  (1+3 pad float), aspectRatio (1+3 pad fsloat)
           uniformData : new Float32Array(76),
+          uniformDataForShadow : new Float32Array(16+16+4),
         };
         GPUApp.canvas = document.querySelector("canvas"),
         GPUApp.adapter = await navigator.gpu.requestAdapter();
@@ -1160,6 +1203,17 @@
           indexFormat: "uint32"
         };
       }
+
+      function createVertexBuffersLayoutForShadow() {
+        return [
+          {
+            arrayStride: 3 * 4,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: "float32x3" } // position
+            ]
+          }
+        ];
+      }
       
       function createVertexBuffersLayout() {
         return [
@@ -1201,6 +1255,20 @@
           GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         );
 
+        GPUApp.uniformBufferForShadow = createGPUBuffer(
+          GPUApp.device, 
+          GPUApp.uniformDataForShadow, 
+          GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        );
+
+        GPUApp.bindGroupForShadow = GPUApp.device.createBindGroup({
+          layout: GPUApp.bindGroupLayoutForShadow,
+          entries: [{
+            binding: 0,
+            resource: { buffer: GPUApp.uniformBuffer },
+          }],
+         });
+
         GPUApp.bindGroup = GPUApp.device.createBindGroup({
           layout: GPUApp.bindGroupLayout,
           entries: [{
@@ -1228,12 +1296,26 @@
 
       function initRenderPipeline(GPUApp) {
         const shaders = document.getElementById("shaders").textContent;
+        const shadowShaders = document.getElementById("shadow-shaders").textContent;
         GPUApp.shaderModule = GPUApp.device.createShaderModule({
           label: "Shaders",
           code: shaders
         });
+        GPUApp.shadowShaderModule = GPUApp.device.createShaderModule({
+          label: "Shadow Shaders",
+          code: shadowShaders
+        });
 
+        GPUApp.vertexBuffersLayoutForShadow = createVertexBuffersLayoutForShadow();
         GPUApp.vertexBuffersLayout = createVertexBuffersLayout();
+
+        GPUApp.bindGroupLayoutForShadow = GPUApp.device.createBindGroupLayout({
+          entries: [{
+            binding: 0,
+            visibility: GPUShaderStage.VERTEX,
+            buffer: { type: "uniform" },
+          }],
+        });
 
         GPUApp.bindGroupLayout = GPUApp.device.createBindGroupLayout({
           entries: [{
@@ -1299,11 +1381,18 @@
           usage: GPUTextureUsage.RENDER_ATTACHMENT,
         });
 
+        // Texture used for the shadow map
+        GPUApp.shadowDepthTexture = GPUApp.device.createTexture({
+          size: [GPUApp.canvas.width, GPUApp.canvas.height],
+          format: "depth24plus",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        });
+
         GPUApp.rayTracingPipeline = GPUApp.device.createRenderPipeline({
             label: "rayTracingPipeline",
             //layout: "auto",
             layout: GPUApp.device.createPipelineLayout({
-              bindGroupLayouts: [GPUApp.bindGroupLayout],
+              bindGroupLayouts: [GPUApp.bindGroupLayoutForShadow],
             }),
             vertex: {
               module: GPUApp.shaderModule,
@@ -1315,6 +1404,28 @@
               targets: [{
                 format: GPUApp.canvasFormat
               }]
+            },
+            primitive: {
+              topology: "triangle-list", // use "line-list" for sanity check
+              cullMode: "back", // activate backface culling
+            },
+            depthStencil: {
+              format: "depth24plus",   // Must match depth texture
+              depthWriteEnabled: true,
+              depthCompare: "less",    // Standard depth (Z) test
+          },
+        });
+
+        GPUApp.shadowPipeline = GPUApp.device.createRenderPipeline({
+            label: "shadowPipeline",
+            //layout: "auto",
+            layout: GPUApp.device.createPipelineLayout({
+              bindGroupLayouts: [GPUApp.bindGroupLayoutForShadow],
+            }),
+            vertex: {
+              module: GPUApp.shadowShaderModule,
+              entryPoint: "shadowVertexMain",
+              buffers: GPUApp.vertexBuffersLayoutForShadow
             },
             primitive: {
               topology: "triangle-list", // use "line-list" for sanity check
@@ -1374,6 +1485,7 @@
         scene.time += 1.0;
         const angle = scene.time/40.0;
         scene.lightSource.position = [200.0*Math.cos (angle) + 280, 500, 200.0*Math.sin (angle) + 280];
+        lookAt(scene.lightSource.lightViewMat, scene.lightSource.position, scene.camera.target, scene.camera.up);
       }
 
       function updateUniforms(GPUApp, scene) {
@@ -1398,12 +1510,43 @@
         );
       }
 
+      function updateUniformsForShadow(GPUApp, scene) {
+        let depthMVP = mat4Multiply(scene.lightSource.lightProjMat, scene.lightSource.lightViewMat);
+        GPUApp.uniformDataForShadow.set(depthMVP, 0);
+        GPUApp.uniformDataForShadow.set(scene.camera.modelMat, 16);
+        GPUApp.device.queue.writeBuffer(
+          GPUApp.uniformBufferForShadow,
+          0,
+          GPUApp.uniformDataForShadow.buffer,
+          GPUApp.uniformDataForShadow.byteOffset,
+          GPUApp.uniformDataForShadow.byteLength
+        );
+      }
+
       function render(GPUApp, scene) {
         var useRayTracing = document.getElementById("raytracingCheckbox").checked;
         if (document.getElementById("animateCheckbox").checked)
           animate(scene);
         updateUniforms(GPUApp, scene);
+        updateUniformsForShadow(GPUApp, scene);
         const encoder = GPUApp.device.createCommandEncoder();
+        const shadowPass = encoder.beginRenderPass({
+          label: "Shadow map generation pass",
+          colorAttachments: [],
+          depthStencilAttachment: {
+            view: GPUApp.shadowDepthTexture.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+        });
+        shadowPass.setPipeline(GPUApp.shadowPipeline);
+        shadowPass.setBindGroup(0, GPUApp.bindGroupForShadow);
+        shadowPass.setVertexBuffer(0, GPUApp.meshBuffers.positionBuffer);
+        shadowPass.setIndexBuffer(GPUApp.meshBuffers.indexBuffer, GPUApp.meshBuffers.indexFormat);
+        shadowPass.drawIndexed(scene.mesh.indices.length);
+        shadowPass.end();
+
         const renderPass = encoder.beginRenderPass({
           label: "Main rendering pass",
           colorAttachments: [{
