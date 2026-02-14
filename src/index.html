@@ -3,75 +3,47 @@
 <html>
   <head>
     <meta charset="utf-8">
-    <title>CSC-52084-EP - Assignment 2 - Ray tracing in WebGPU - Solution</title>
+    <title>Reflective Shadow Maps</title>
   </head>
   <body style="margin-left:20%; margin-right:20%; padding:0">
     <div style = "text-align:center;">
       <canvas width="1024" height="768"></canvas>
       <p>
-      <input type="checkbox" id="raytracingCheckbox">
-      <label for="raytracingCheckbox">Ray tracing</label>
-      <input type="checkbox" id="raytracedShadowsCheckbox">
-      <label for="raytracedShadowsCheckbox">Ray-traced shadows</label>
       <input type="checkbox" id="animateCheckbox">
       <label for="animateCheckbox">Animate</label>
       </p>
     </div>
     <div style = "text-align:left;">
       <p>
-        This solution to Assignment 2 provides the <a href="https://bowers.cornell.edu/computer-graphics/data#cornellbox">Cornell Box</a>, and a ray tracing pipeline. 
+        Blabla
       </p>
-      <p>
-        A few observations:
-        <ul>
-          <li> rays are computed using the inverse of the view matrix, computed once on CPU and passed along the other matrices to GPU as a <i>uniform</i> value</li>
-          <li> the ray-triangle intersection routine is based on the course notes (see the slide deck), which is itself based the <a target="_blank" href="https://cadxfem.org/inf/Fast%20MinimumStorage%20RayTriangle%20Intersection.pdf">M&ouml;ller-Trumbose</a> algorithm</li>
-          <li> this routine is used as is for testing light visibility i.e., shadows, but a simpler (more efficient) version can be used instead, as any hit is valid and no reconstruction of the actual intersection point is needed.</li>
-        </ul>
-        Beyond the algorithms to implement, a key aspect of this assignment resides in the CPU/GPU interop.:
-        <ul>
-         <li> additional <i>uniform</i> variables need to be passed to the GPU, while being careful about the <i>padding</i> (see the shader code)</li>
-         <li> the fragment shader of the ray tracing pipeline (in charge of ray tracing the scene) accesses the mesh buffers as <i>storage buffers</i> for random queries; these buffer are bind differently than with the rasterization pipeline.</li>
-         <li> the rasterized geometry isprocedurally defined in the ray tracing pipeline, entirely on GPU.
-        </ul>
-        You can refer to the <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API">WebGPU documentation</a> for more information about the actual WebGPU/WGSL code.
-      </p> 
     </div>
     <script type="x-shader/wgsl" id="shaders">
       struct Uniforms {
         modelMat : mat4x4<f32>,
         viewMat : mat4x4<f32>,
-        invViewMat: mat4x4<f32>,
         projMat : mat4x4<f32>,
+        lightMVP : mat4x4<f32>,
         lightPosition : vec3<f32>,
-        rayTracedShadows : u32,
+        _pad0 : f32,
         lightColor : vec3<f32>,
         _pad1 : f32,
-        camFov: f32,
-        camAspectRatio: f32,
-        _pad2: vec2<f32>,
       };
       
       @group(0) @binding(0)
       var<uniform> uniforms : Uniforms;
 
       @group(0) @binding(1)
-      var<storage, read> positions : array<f32>;
-
+      var shadowDepthTexture : texture_depth_2d;
+        
       @group(0) @binding(2)
-      var<storage, read> normals : array<f32>;
-
-      @group(0) @binding(3)
-      var<storage, read> colors : array<f32>;
-
-      @group(0) @binding(4)
-      var<storage, read> triangles : array<u32>;
+      var shadowSampler : sampler_comparison;
       
       struct RasterVertexInput {
         @location(0) pos: vec3f,
         @location(1) normal: vec3f,
         @location(2) color: vec3f,
-        @location(3) uv: vec2f,  
+        @location(3) uv: vec2f,
         @builtin(instance_index) instance: u32
       };
   
@@ -81,6 +53,7 @@
         @location(1) normal: vec3f,
         @location(2) color: vec3f,
         @location(3) uv: vec2f,
+        @location(4) shadowPos: vec3f,
       };
 
       fn ambientShade(baseColor: vec3f) -> vec3f {
@@ -118,192 +91,26 @@
           output.normal = input.normal;
           output.color = input.color;
           output.uv = input.uv;
+          output.shadowPos = (uniforms.lightMVP * uniforms.modelMat * vec4f (input.pos, 1)).xyz;
           return output;
         }
 
       @fragment
         fn rasterFragmentMain(input: RasterVertexOutput) -> @location(0) vec4f {
+          var projCoords = input.shadowPos / input.shadowPos.z;
+          projCoords = projCoords * 0.5 + vec3f(0.5);
           var position = input.position;
           var normal = normalize (input.normal);
           var baseColor = input.color;
-          var colorResponse = shade (position, normal, baseColor);
+          var shadow = textureSampleCompare (shadowDepthTexture, shadowSampler, projCoords.xy, projCoords.z - 0.005);
+          var colorResponse = ambientShade(baseColor) + shadow * lightShade(position, normal, baseColor);
           return vec4f (colorResponse, 1.0);
-        }
-
-      //-----------------------------------------------------------------------
-      // Ray tracing pipeline shaders
-      //-----------------------------------------------------------------------
-
-      struct RayVertexInput {
-        @builtin(vertex_index) vertexIndex: u32
-      };
-  
-      struct RayVertexOutput {
-        @builtin(position) pos : vec4f,
-      }; 
-
-      struct RayFragmentInput {
-        @builtin(position) fragPos : vec4f,
-      };
-
-      struct Ray {
-        origin: vec3f,
-        direction: vec3f,
-      };
-
-      struct Hit{
-        index: u32,
-        u: f32,
-        v: f32,
-        t: f32,
-      };
-
-      fn interpolate(x0: vec3f, x1: vec3f, x2: vec3f, uvw: vec3f) -> vec3f {
-        return uvw.z * x0 + uvw.x * x1 + uvw.y * x2;
-      }
-
-      fn getVertPos(vertIndex: u32) -> vec3f {
-        return vec3f (positions[3*vertIndex], positions[3*vertIndex+1], positions[3*vertIndex+2]);
-      }
-
-      fn getVertNormal(vertIndex: u32) -> vec3f {
-        return vec3f (normals[3*vertIndex], normals[3*vertIndex+1], normals[3*vertIndex+2]);
-      }
-
-      fn getVertColor(vertIndex: u32) -> vec3f {
-        return vec3f (colors[3*vertIndex], colors[3*vertIndex+1], colors[3*vertIndex+2]);
-      }
-
-      fn getTriangle(triIndex: u32) -> vec3u {
-        return vec3u (triangles[3*triIndex], triangles[3*triIndex+1], triangles[3*triIndex+2]);
-      }
-
-      fn rayAt(uv: vec2f, invViewMat : mat4x4<f32>) -> Ray {
-        var ray : Ray;
-        var viewRight = normalize (invViewMat[0].xyz);
-        var viewUp = normalize (invViewMat[1].xyz);
-        var viewDir = -normalize (invViewMat[2].xyz);
-        var eye = invViewMat[3].xyz;
-        var fov = uniforms.camFov;
-        var w = 2.0 * tan (0.5*fov); 
-        ray.origin = eye;
-        var aspectRatio = uniforms.camAspectRatio;
-        ray.direction = normalize (viewDir + ((uv.x - 0.5) * aspectRatio * w) * viewRight + ((uv.y) - 0.5) * w * viewUp);  
-        return ray;
-      }
-
-      fn intersectTriangle(
-        ray: Ray, 
-        p0: vec3f, 
-        p1: vec3f, 
-        p2: vec3f, 
-        culling: bool,
-        tMin: f32,
-        tMax: f32,
-        hit: ptr<function, Hit>
-      ) -> bool {
-        const EPSILON = 1e-6;
-        var e1 = p1 - p0;
-        var e2 = p2 - p0;
-        var dxe2 = cross(ray.direction, e2);
-        var det = dot(e1, dxe2);
-        if ((culling && det < EPSILON) || (!culling && abs(det) < EPSILON)) {
-          return false;
-        }
-        var invDet = 1.0 / det;
-        var op0 = ray.origin - p0;
-        (*hit).u = dot(op0, dxe2) * invDet;
-        if ((*hit).u < 0.0 || (*hit).u > 1.f) {
-          return false;
-        }
-        var op0xe1 = cross(op0, e1);
-        (*hit).t = dot(e2, op0xe1) * invDet;
-        if ((*hit).t < tMin || (*hit).t > tMax) {
-          return false;
-        }
-        (*hit).v = dot(ray.direction, op0xe1) * invDet;
-        if ((*hit).v >= 0.0 && (*hit).u + (*hit).v <= 1.0) {
-          return true;
-        }
-        return false;
-      }
-
-      fn rayTrace(ray: Ray, hit: ptr<function, Hit>) -> bool {
-        const MAX_DISTANCE = 1e8;
-        var intersectionFound = false;
-        for (var triIndex = 0u; triIndex < 100; triIndex++) {
-          var triangle = getTriangle(triIndex);
-          var triHit: Hit;
-          triHit.index = triIndex;
-          var p0 = getVertPos(triangle.x);
-          var p1 = getVertPos(triangle.y);
-          var p2 = getVertPos(triangle.z);
-          if (intersectTriangle(ray, p0, p1, p2, true, 0.0, MAX_DISTANCE, &triHit) == true) {
-            if (!intersectionFound || (intersectionFound && triHit.t < hit.t)) {
-              *hit = triHit;
-              intersectionFound = true;
-            }
-          }
-        }
-        return intersectionFound;
-      }
-
-      fn shadeRT(hit: Hit) -> vec4f {
-        var tri = vec3u (triangles[3*hit.index], triangles[3*hit.index+1], triangles[3*hit.index+2]);
-        var uvw = vec3f (hit.u, hit.v, 1.0 - hit.u - hit.v);
-        var position = interpolate(getVertPos(tri.x), getVertPos(tri.y), getVertPos(tri.z), uvw);
-        var normal = normalize(interpolate(getVertNormal(tri.x), getVertNormal(tri.y), getVertNormal(tri.z), uvw));
-        var baseColor = interpolate(getVertColor(tri.x), getVertColor(tri.y), getVertColor(tri.z), uvw);
-        var colorResponse = ambientShade (baseColor);
-        if (bool(uniforms.rayTracedShadows) == true) {
-          var shadowRay : Ray;
-          const shadowBias = 0.0001;
-          var pos2light = uniforms.lightPosition - position;
-          var lightDist = length (pos2light);
-          shadowRay.direction = normalize (pos2light);
-          shadowRay.origin = position + shadowBias * normal;
-          var shadowHit : Hit;
-          var inShadow = rayTrace (shadowRay, &shadowHit);
-          if (inShadow == false || (inShadow == true && shadowHit.t > lightDist)) {
-            colorResponse += lightShade (position, normal, baseColor);
-          }
-        } else {
-          colorResponse += lightShade (position, normal, baseColor);
-        }
-        return vec4f (colorResponse, 1.0);
-      }
-
-      @vertex
-        fn rayVertexMain(input: RayVertexInput) -> RayVertexOutput {
-          var output: RayVertexOutput;
-          const screenPos = array<vec2<f32>, 6>(
-              vec2f(-1.0, -1.0),
-              vec2f( 1.0, -1.0),
-              vec2f(-1.0,  1.0),
-              vec2f(-1.0,  1.0),
-              vec2f( 1.0, -1.0),
-              vec2f( 1.0,  1.0),
-          );
-          output.pos = vec4f (screenPos[input.vertexIndex], 0.0, 1.0);
-          return output;
-        }
-
-      @fragment
-        fn rayFragmentMain(input: RayFragmentInput) -> @location(0) vec4f {
-          var coord = vec2f (input.fragPos.x/1024, 1.0-input.fragPos.y/768);
-          var ray = rayAt (coord, uniforms.invViewMat);
-          var colorResponse = vec4f (0.0, 0.0, 0.0, 1.0);
-          var hit: Hit;
-          if (rayTrace (ray, &hit) == true) {
-            colorResponse = shadeRT (hit);
-          }
-          return colorResponse;
         }
     </script>
     <script type="x-shader/wgsl" id="shadow-shaders">
       struct Uniforms {
-        modelMat : mat4x4<f32>,
-        depthMVP : mat4x4<f32>
+        lightMVP : mat4x4<f32>,
+        modelMat : mat4x4<f32>
       };
 
       @group(0) @binding(0)
@@ -320,7 +127,7 @@
       @vertex
         fn shadowVertexMain(input: ShadowVertexInput) -> ShadowVertexOutput {
           var output: ShadowVertexOutput;
-          output.builtInPos = uniforms.depthMVP * uniforms.modelMat * vec4f (input.pos, 1);
+          output.builtInPos = uniforms.lightMVP * uniforms.modelMat * vec4f (input.pos, 1);
           return output;
         }
     </script>
@@ -1077,11 +884,11 @@
         const scene = {
           camera: createCamera(camAspect),
           lightSource: {
-            position: [280.0, 280.0, 0.0],
+            position: [280.0, 140.0, -280.0],
             color: [1.0, 1.0, 1.0],
             lightViewMat: mat4Identity(),
             lightProjMat: mat4Perspective(
-              Math.PI / 2.0,
+              Math.PI / 4.0,
               1.0,
               0.1,
               10000.0
@@ -1130,17 +937,16 @@
           bindGroupLayoutForShadow: {},
           // Rasterization pipeline
           rasterizationPipeline: {},
-          // Ray Tracing pipeline
-          rayTracingPipeline: {},
           // Shadow pipeline
           shadowPipeline: {},
           // Depth map used to store per-pixel depth (Z-Buffer)
           depthTexture: {},
           // Shadow depth map
           shadowDepthTexture: {},
+          shadowDepthTextureView: {},
           // Model/View/Inverse View/Projection matrix (16 floats each), light position (3+1 pad floats), color (3+1 pad float), fov  (1+3 pad float), aspectRatio (1+3 pad fsloat)
-          uniformData : new Float32Array(76),
-          uniformDataForShadow : new Float32Array(16+16+4),
+          uniformData : new Float32Array(72),
+          uniformDataForShadow : new Float32Array(16+16),
         };
         GPUApp.canvas = document.querySelector("canvas"),
         GPUApp.adapter = await navigator.gpu.requestAdapter();
@@ -1265,7 +1071,7 @@
           layout: GPUApp.bindGroupLayoutForShadow,
           entries: [{
             binding: 0,
-            resource: { buffer: GPUApp.uniformBuffer },
+            resource: { buffer: GPUApp.uniformBufferForShadow },
           }],
          });
 
@@ -1277,19 +1083,16 @@
           },
           {
             binding: 1,
-            resource: { buffer: GPUApp.meshBuffers.positionBuffer },
+            resource: GPUApp.shadowDepthTextureView,
           },
           {
             binding: 2,
-            resource: { buffer: GPUApp.meshBuffers.normalBuffer },
-          },
-          {
-            binding: 3,
-            resource: { buffer: GPUApp.meshBuffers.colorBuffer },
-          },
-          {
-            binding: 4,
-            resource: { buffer: GPUApp.meshBuffers.indexBuffer },
+            resource: GPUApp.device.createSampler({
+              compare: "less",
+              magFilter: "linear",
+              minFilter: "linear",
+              mipmapFilter: "linear",
+            }),
           }],
          });
       }
@@ -1325,23 +1128,13 @@
           },
           {
             binding: 1,
-            visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-            buffer: { type: "read-only-storage" },
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "depth" },
           },
           {
             binding: 2,
-            visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-            buffer: { type: "read-only-storage" },
-          },
-          {
-            binding: 3,
-            visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-            buffer: { type: "read-only-storage" },
-          },
-          {
-            binding: 4,
-            visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-            buffer: { type: "read-only-storage" },
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            sampler: { type: "comparison" },
           }],
         });  
 
@@ -1383,38 +1176,11 @@
 
         // Texture used for the shadow map
         GPUApp.shadowDepthTexture = GPUApp.device.createTexture({
-          size: [GPUApp.canvas.width, GPUApp.canvas.height],
-          format: "depth24plus",
+          size: [1024, 1024, 1],
+          format: "depth32float",
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
-
-        GPUApp.rayTracingPipeline = GPUApp.device.createRenderPipeline({
-            label: "rayTracingPipeline",
-            //layout: "auto",
-            layout: GPUApp.device.createPipelineLayout({
-              bindGroupLayouts: [GPUApp.bindGroupLayoutForShadow],
-            }),
-            vertex: {
-              module: GPUApp.shaderModule,
-              entryPoint: "rayVertexMain",
-            },
-            fragment: {
-              module: GPUApp.shaderModule,
-              entryPoint: "rayFragmentMain",
-              targets: [{
-                format: GPUApp.canvasFormat
-              }]
-            },
-            primitive: {
-              topology: "triangle-list", // use "line-list" for sanity check
-              cullMode: "back", // activate backface culling
-            },
-            depthStencil: {
-              format: "depth24plus",   // Must match depth texture
-              depthWriteEnabled: true,
-              depthCompare: "less",    // Standard depth (Z) test
-          },
-        });
+        GPUApp.shadowDepthTextureView = GPUApp.shadowDepthTexture.createView();
 
         GPUApp.shadowPipeline = GPUApp.device.createRenderPipeline({
             label: "shadowPipeline",
@@ -1432,7 +1198,7 @@
               cullMode: "back", // activate backface culling
             },
             depthStencil: {
-              format: "depth24plus",   // Must match depth texture
+              format: "depth32float",   // Must match depth texture
               depthWriteEnabled: true,
               depthCompare: "less",    // Standard depth (Z) test
           },
@@ -1490,17 +1256,15 @@
 
       function updateUniforms(GPUApp, scene) {
         updateCamera(scene.camera);
+        let lightMVP = mat4Multiply(scene.lightSource.lightProjMat, scene.lightSource.lightViewMat);
         GPUApp.uniformData.set(scene.camera.modelMat, 0);
         GPUApp.uniformData.set(scene.camera.viewMat, 16);
-        const invViewMat = mat4Invert (scene.camera.viewMat);
-        GPUApp.uniformData.set(invViewMat, 32);
-        GPUApp.uniformData.set(scene.camera.projMat, 48);
+        GPUApp.uniformData.set(scene.camera.projMat, 32);
+        GPUApp.uniformData.set(lightMVP, 48);
         GPUApp.uniformData.set(scene.lightSource.position, 64);
-        var useRaytracedShadows = document.getElementById("raytracedShadowsCheckbox").checked;
-        GPUApp.uniformData[67] = (useRaytracedShadows == true ? 1 : 0); // Ray traced shadow
+        GPUApp.uniformData[67] = 1.0; // pad
         GPUApp.uniformData.set(scene.lightSource.color, 68);
-        GPUApp.uniformData[72] = scene.camera.fov;
-        GPUApp.uniformData[73] = scene.camera.aspect;
+        GPUApp.uniformData[71] = 1.0; // pad
         GPUApp.device.queue.writeBuffer(
           GPUApp.uniformBuffer,
           0,
@@ -1511,8 +1275,8 @@
       }
 
       function updateUniformsForShadow(GPUApp, scene) {
-        let depthMVP = mat4Multiply(scene.lightSource.lightProjMat, scene.lightSource.lightViewMat);
-        GPUApp.uniformDataForShadow.set(depthMVP, 0);
+        let lightMVP = mat4Multiply(scene.lightSource.lightProjMat, scene.lightSource.lightViewMat);
+        GPUApp.uniformDataForShadow.set(lightMVP, 0);
         GPUApp.uniformDataForShadow.set(scene.camera.modelMat, 16);
         GPUApp.device.queue.writeBuffer(
           GPUApp.uniformBufferForShadow,
@@ -1524,7 +1288,6 @@
       }
 
       function render(GPUApp, scene) {
-        var useRayTracing = document.getElementById("raytracingCheckbox").checked;
         if (document.getElementById("animateCheckbox").checked)
           animate(scene);
         updateUniforms(GPUApp, scene);
@@ -1534,7 +1297,7 @@
           label: "Shadow map generation pass",
           colorAttachments: [],
           depthStencilAttachment: {
-            view: GPUApp.shadowDepthTexture.createView(),
+            view: GPUApp.shadowDepthTextureView,
             depthClearValue: 1.0,
             depthLoadOp: "clear",
             depthStoreOp: "store",
@@ -1563,23 +1326,14 @@
             depthStoreOp: "store",
           },
         });
-        if (useRayTracing == true)
-          renderPass.setPipeline(GPUApp.rayTracingPipeline);
-        else {
-          
-          renderPass.setPipeline(GPUApp.rasterizationPipeline);
-        }
+        renderPass.setPipeline(GPUApp.rasterizationPipeline);
         renderPass.setBindGroup(0, GPUApp.bindGroup);
-        if (useRayTracing == false) {
-          renderPass.setVertexBuffer(0, GPUApp.meshBuffers.positionBuffer);
-          renderPass.setVertexBuffer(1, GPUApp.meshBuffers.normalBuffer);
-          renderPass.setVertexBuffer(2, GPUApp.meshBuffers.colorBuffer);
-          renderPass.setVertexBuffer(3, GPUApp.meshBuffers.uvBuffer);
-          renderPass.setIndexBuffer(GPUApp.meshBuffers.indexBuffer, GPUApp.meshBuffers.indexFormat);
-          renderPass.drawIndexed(scene.mesh.indices.length);
-        } else {
-          renderPass.draw(6); // 2 triangles for a full screen quad
-        }
+        renderPass.setVertexBuffer(0, GPUApp.meshBuffers.positionBuffer);
+        renderPass.setVertexBuffer(1, GPUApp.meshBuffers.normalBuffer);
+        renderPass.setVertexBuffer(2, GPUApp.meshBuffers.colorBuffer);
+        renderPass.setVertexBuffer(3, GPUApp.meshBuffers.uvBuffer);
+        renderPass.setIndexBuffer(GPUApp.meshBuffers.indexBuffer, GPUApp.meshBuffers.indexFormat);
+        renderPass.drawIndexed(scene.mesh.indices.length);
         renderPass.end();
         const commandBuffer = encoder.finish();
         GPUApp.device.queue.submit([commandBuffer]);
