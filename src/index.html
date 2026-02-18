@@ -53,7 +53,7 @@
         @location(1) normal: vec3f,
         @location(2) color: vec3f,
         @location(3) uv: vec2f,
-        @location(4) shadowPos: vec3f,
+        @location(4) shadowPos: vec4f,
       };
 
       fn ambientShade(baseColor: vec3f) -> vec3f {
@@ -91,18 +91,18 @@
           output.normal = input.normal;
           output.color = input.color;
           output.uv = input.uv;
-          var posFromLight = uniforms.lightMVP * uniforms.modelMat * vec4f (input.pos, 1);
-          output.shadowPos = vec3f(posFromLight.xy * vec2(0.5, -0.5) + vec2(0.5), posFromLight.z);
+          output.shadowPos = uniforms.lightMVP * uniforms.modelMat * vec4f (input.pos, 1);
           return output;
         }
 
       @fragment
         fn rasterFragmentMain(input: RasterVertexOutput) -> @location(0) vec4f {
-          var projCoords = input.shadowPos;
+          var homogeneousCoords = input.shadowPos.xyz / input.shadowPos.w;
+          var projCoords = vec3f(homogeneousCoords.x*0.5+0.5, homogeneousCoords.y*0.5+0.5, homogeneousCoords.z);
           var position = input.position;
           var normal = normalize (input.normal);
           var baseColor = input.color;
-          var shadow = textureSampleCompare (shadowDepthTexture, shadowSampler, projCoords.xy, projCoords.z - 0.007);
+          var shadow = textureSampleCompare (shadowDepthTexture, shadowSampler, vec2f(projCoords.x, 1.0 - projCoords.y), projCoords.z - 0.00005);
           var colorResponse = ambientShade(baseColor) + shadow * lightShade(position, normal, baseColor);
           return vec4f (colorResponse, 1.0);
         }
@@ -897,10 +897,16 @@
         const scene = {
           camera: createCamera(camAspect),
           lightSource: {
-            position: [280.0, 290.0, -280.0],
+            position: [280.0, 280.0, -280.0],
             color: [1.0, 1.0, 1.0],
             lightViewMat: mat4Identity(),
-            lightProjMat: mat4Ortho(-400, 400, -400, 400, 0.1, 1000)
+            // lightProjMat: mat4Ortho(-400, 400, -400, 400, 0.1, 1000.0), // for directional light
+            lightProjMat: mat4Perspective(
+              Math.PI / 2.0,
+              1.0,
+              1.0,
+              1000.0
+            ),
           },
           //mesh: createCube(1.2),
           //mesh: createSphere(0.8, 32, 32),
