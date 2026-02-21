@@ -1277,15 +1277,6 @@
           {
             binding: 4,
             resource: GPUApp.shadowFluxTexture.createView(),
-          },
-          {
-            binding: 5,
-            resource: GPUApp.device.createSampler({
-              compare: "less",
-              magFilter: "linear",
-              minFilter: "linear",
-              mipmapFilter: "linear",
-            }),
           }],
         });
       }
@@ -1376,11 +1367,6 @@
             binding: 4,
             visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
             texture: { sampleType: "float" },
-          },
-          {
-            binding: 5,
-            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
-            sampler: { type: "comparison" },
           }],
         });
 
