@@ -8,10 +8,18 @@
   <body style="margin-left:20%; margin-right:20%; padding:0">
     <div style = "text-align:center;">
       <canvas width="1024" height="768"></canvas>
-      <p>
-      <input type="checkbox" id="animateCheckbox">
-      <label for="animateCheckbox">Animate</label>
-      </p>
+      <div style="text-align:center; margin-top:10px;">
+        <label>Debug View:</label>
+        <select id="debugSelect">
+          <option value="none">None</option>
+          <option value="depth">Shadow Depth</option>
+          <option value="position">Shadow Position</option>
+          <option value="normal">Shadow Normal</option>
+          <option value="flux">Shadow Flux</option>
+        </select>
+        <input type="checkbox" id="animateCheckbox">
+        <label for="animateCheckbox">Animate</label>
+      </div>
     </div>
     <div style = "text-align:left;">
       <p>
@@ -37,6 +45,15 @@
       var shadowDepthTexture : texture_depth_2d;
         
       @group(0) @binding(2)
+      var shadowPositionTexture : texture_2d<f32>;
+
+      @group(0) @binding(3)
+      var shadowNormalTexture : texture_2d<f32>;
+
+      @group(0) @binding(4)
+      var shadowFluxTexture : texture_2d<f32>;
+
+      @group(0) @binding(5)
       var shadowSampler : sampler_comparison;
       
       struct RasterVertexInput {
@@ -138,7 +155,7 @@
           var output: ShadowVertexOutput;
           output.builtInPos = uniforms.lightMVP * uniforms.modelMat * vec4f (input.pos, 1);
           output.position = uniforms.modelMat * vec4f (input.pos, 1);
-          output.normal = vec4f (input.normal, 1.0);
+          output.normal = uniforms.modelMat * vec4f (input.normal, 1.0);
           return output;
         }
 
@@ -149,6 +166,80 @@
           output.normal = vec4f (normalize (input.normal.xyz), 1.0);
           output.flux = vec4f (1.0, 1.0, 1.0, 1.0);
           return output;
+        }
+    </script>
+    <script type="x-shader/wgsl" id="debug-shaders">
+      struct Uniforms {
+        debugView : u32,
+        _pad0 : vec3<u32>,
+      };
+
+      @group(0) @binding(0)
+      var<uniform> uniforms : Uniforms;
+
+      @group(0) @binding(1)
+      var shadowDepthTexture : texture_depth_2d;
+        
+      @group(0) @binding(2)
+      var shadowPositionTexture : texture_2d<f32>;
+
+      @group(0) @binding(3)
+      var shadowNormalTexture : texture_2d<f32>;
+
+      @group(0) @binding(4)
+      var shadowFluxTexture : texture_2d<f32>;
+
+      struct DebugVertexOutput {
+        @builtin(position) builtInPos : vec4f,
+        @location(0) uv: vec2f,
+      };
+
+      @vertex
+        fn debugVertexMain(@builtin(vertex_index) vertexIndex: u32) -> DebugVertexOutput {
+          var pos = array<vec2f, 3>(
+            vec2f(-1.0, -1.0),
+            vec2f( 3.0, -1.0),
+            vec2f(-1.0,  3.0)
+          );
+
+          var uv = array<vec2f, 3>(
+            vec2f(0.0, 0.0),
+            vec2f(2.0, 0.0),
+            vec2f(0.0, 2.0)
+          );
+          var output: DebugVertexOutput;
+          output.builtInPos = vec4f (pos[vertexIndex], 0, 1);
+          output.uv = uv[vertexIndex];
+          return output;
+        }
+
+      @fragment
+        fn debugFragmentMain(input: DebugVertexOutput) -> @location(0) vec4f {
+          var color: vec4f = vec4f (0.0, 0.0, 0.0, 1.0);
+          let uvFlipped = vec2f(input.uv.x, 1.0 - input.uv.y);
+          if (uniforms.debugView == 1u) {
+            let depth = textureLoad (shadowDepthTexture, vec2i(uvFlipped * vec2f(textureDimensions(shadowDepthTexture))), 0);
+            
+            // For this one we have to convert to linear depth otherwise we can't see anything
+            let near = 1.0;
+            let far = 1000.0;
+            let z = depth * 2.0 - 1.0;
+            let linearDepth = (2.0 * near * far) / (far + near - z * (far - near));
+            let normalized = linearDepth / far;
+
+            color = vec4f(vec3f(normalized), 1.0);
+          } else if (uniforms.debugView == 2u) { 
+            let texture = textureLoad (shadowPositionTexture, vec2i(uvFlipped * vec2f(textureDimensions(shadowPositionTexture))), 0);
+            let normalized = (texture.xyz + vec3f(500.0, 500.0, 500.0)) / vec3f(1000.0, 1000.0, 1000.0); // I need to find a better, generalized way to map to [0, 1]
+            color = vec4f(normalized, 1.0);
+          } else if (uniforms.debugView == 3u) {
+            let texture = textureLoad (shadowNormalTexture, vec2i(uvFlipped * vec2f(textureDimensions(shadowNormalTexture))), 0);
+            let normalized = 0.5 * texture.xyz + vec3f(0.5, 0.5, 0.5); // [-1, 1] -> [0, 1]
+            color = vec4f(normalized, 1.0);
+          } else if (uniforms.debugView == 4u) {
+            color = textureLoad (shadowFluxTexture, vec2i(uvFlipped * vec2f(textureDimensions(shadowFluxTexture))), 0);
+          }
+          return color;
         }
     </script>
     <script type="module">
@@ -956,23 +1047,30 @@
           // GPU memory used to pass parameters from CPU to GPU, such as the camera or light properties
           uniformBuffer: {},
           uniformBufferForShadow: {},
+          uniformBufferForDebug: {},
           // Handle on GPU parameters
           bindGroup: {},
           bindGroupForShadow: {},
+          bindGroupForDebug: {},
           // Handle on the GPU shaders
           shaderModule: {},
           // Shadow code used for rendering
           shadowShaderModule: {},
+          // Debug code
+          debugShaderModule: {},
           // Organization of the input of the pipeline/vertex shader
           vertexBuffersLayout: {},
           vertexBuffersLayoutForShadow: {},
           // Organization of the 
           bindGroupLayout: {},
           bindGroupLayoutForShadow: {},
+          bindGroupLayoutForDebug: {},
           // Rasterization pipeline
           rasterizationPipeline: {},
           // Shadow pipeline
           shadowPipeline: {},
+          // Debug pipeline (to simulate the first images of the paper and help in debugging)
+          debugPipeline: {},
           // Depth map used to store per-pixel depth (Z-Buffer)
           depthTexture: {},
           // Shadow depth map
@@ -984,6 +1082,7 @@
           // Model/View/Inverse View/Projection matrix (16 floats each), light position (3+1 pad floats), color (3+1 pad float), fov  (1+3 pad float), aspectRatio (1+3 pad fsloat)
           uniformData : new Float32Array(72),
           uniformDataForShadow : new Float32Array(16+16),
+          uniformDataForDebug : new Uint32Array(32),
         };
         GPUApp.canvas = document.querySelector("canvas"),
         GPUApp.adapter = await navigator.gpu.requestAdapter();
@@ -1110,6 +1209,12 @@
           GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         );
 
+        GPUApp.uniformBufferForDebug = createGPUBuffer(
+          GPUApp.device, 
+          GPUApp.uniformDataForDebug, 
+          GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        );
+
         GPUApp.bindGroupForShadow = GPUApp.device.createBindGroup({
           layout: GPUApp.bindGroupLayoutForShadow,
           entries: [{
@@ -1130,6 +1235,18 @@
           },
           {
             binding: 2,
+            resource: GPUApp.shadowPositionTexture.createView(),
+          },
+          {
+            binding: 3,
+            resource: GPUApp.shadowNormalTexture.createView(),
+          },
+          {
+            binding: 4,
+            resource: GPUApp.shadowFluxTexture.createView(),
+          },
+          {
+            binding: 5,
             resource: GPUApp.device.createSampler({
               compare: "less",
               magFilter: "linear",
@@ -1138,11 +1255,45 @@
             }),
           }],
          });
+
+        GPUApp.bindGroupForDebug = GPUApp.device.createBindGroup({
+          layout: GPUApp.bindGroupLayoutForDebug,
+          entries: [{
+            binding: 0,
+            resource: { buffer: GPUApp.uniformBufferForDebug },
+          },
+          {
+            binding: 1,
+            resource: GPUApp.shadowDepthTexture.createView(),
+          },
+          {
+            binding: 2,
+            resource: GPUApp.shadowPositionTexture.createView(),
+          },
+          {
+            binding: 3,
+            resource: GPUApp.shadowNormalTexture.createView(),
+          },
+          {
+            binding: 4,
+            resource: GPUApp.shadowFluxTexture.createView(),
+          },
+          {
+            binding: 5,
+            resource: GPUApp.device.createSampler({
+              compare: "less",
+              magFilter: "linear",
+              minFilter: "linear",
+              mipmapFilter: "linear",
+            }),
+          }],
+        });
       }
 
       function initRenderPipeline(GPUApp) {
         const shaders = document.getElementById("shaders").textContent;
         const shadowShaders = document.getElementById("shadow-shaders").textContent;
+        const debugShaders = document.getElementById("debug-shaders").textContent;
         GPUApp.shaderModule = GPUApp.device.createShaderModule({
           label: "Shaders",
           code: shaders
@@ -1150,6 +1301,10 @@
         GPUApp.shadowShaderModule = GPUApp.device.createShaderModule({
           label: "Shadow Shaders",
           code: shadowShaders
+        });
+        GPUApp.debugShaderModule = GPUApp.device.createShaderModule({
+          label: "Debug Shaders",
+          code: debugShaders
         });
 
         GPUApp.vertexBuffersLayoutForShadow = createVertexBuffersLayoutForShadow();
@@ -1177,9 +1332,57 @@
           {
             binding: 2,
             visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
+          },
+          {
+            binding: 3,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
+          },
+          {
+            binding: 4,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
+          },
+          {
+            binding: 5,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
             sampler: { type: "comparison" },
           }],
         });  
+
+        GPUApp.bindGroupLayoutForDebug = GPUApp.device.createBindGroupLayout({
+          entries: [{
+            binding: 0,
+            visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+            buffer: { type: "uniform" },
+          },
+          {
+            binding: 1,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "depth" },
+          },
+          {
+            binding: 2,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
+          },
+          {
+            binding: 3,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
+          },
+          {
+            binding: 4,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
+          },
+          {
+            binding: 5,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            sampler: { type: "comparison" },
+          }],
+        });
 
         GPUApp.rasterizationPipeline = GPUApp.device.createRenderPipeline({
             label: "rasterizationPipeline",
@@ -1219,25 +1422,25 @@
 
         // Texture used for the shadow map
         GPUApp.shadowDepthTexture = GPUApp.device.createTexture({
-          size: [1024, 1024, 1],
+          size: [GPUApp.canvas.width, GPUApp.canvas.height],
           format: "depth32float",
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
 
         GPUApp.shadowPositionTexture = GPUApp.device.createTexture({
-          size: [1024, 1024, 1],
+          size: [GPUApp.canvas.width, GPUApp.canvas.height],
           format: "rgba16float",
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
 
         GPUApp.shadowNormalTexture = GPUApp.device.createTexture({
-          size: [1024, 1024, 1],
+          size: [GPUApp.canvas.width, GPUApp.canvas.height],
           format: "rgba16float",
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
 
         GPUApp.shadowFluxTexture = GPUApp.device.createTexture({
-          size: [1024, 1024, 1],
+          size: [GPUApp.canvas.width, GPUApp.canvas.height],
           format: "rgba16float",
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
@@ -1271,6 +1474,29 @@
                   { format: "rgba16float" }, // flux
                 ]
               },
+        });
+
+        GPUApp.debugPipeline = GPUApp.device.createRenderPipeline({
+          label: "debugPipeline",
+          //layout: "auto",
+          layout: GPUApp.device.createPipelineLayout({
+            bindGroupLayouts: [GPUApp.bindGroupLayoutForDebug],
+          }),
+          vertex: {
+            module: GPUApp.debugShaderModule,
+            entryPoint: "debugVertexMain",
+            buffers: []
+          },
+          fragment: {
+            module: GPUApp.debugShaderModule,
+            entryPoint: "debugFragmentMain",
+            targets: [{
+              format: GPUApp.canvasFormat
+            }]
+          },
+          primitive: {
+            topology: "triangle-list", // use "line-list" for sanity check
+          },
         });
       }
 
@@ -1356,10 +1582,23 @@
         );
       }
 
+      function updateUniformsForDebug(GPUApp, debugViewInt) {
+        GPUApp.uniformDataForDebug[0] = debugViewInt;
+        GPUApp.device.queue.writeBuffer(
+          GPUApp.uniformBufferForDebug,
+          0,
+          GPUApp.uniformDataForDebug.buffer,
+          GPUApp.uniformDataForDebug.byteOffset,
+          GPUApp.uniformDataForDebug.byteLength
+        );
+      }
+
       function render(GPUApp, scene) {
         if (document.getElementById("animateCheckbox").checked)
           animate(scene);
+        const debugView = document.getElementById("debugSelect").value;
         updateUniforms(GPUApp, scene);
+        updateUniformsForDebug(GPUApp, debugView == "none" ? 0 : debugView == "depth" ? 1 : debugView == "position" ? 2 : debugView == "normal" ? 3 : 4);
         updateUniformsForShadow(GPUApp, scene);
         const encoder = GPUApp.device.createCommandEncoder();
         const shadowPass = encoder.beginRenderPass({
@@ -1399,31 +1638,48 @@
         shadowPass.drawIndexed(scene.mesh.indices.length);
         shadowPass.end();
 
-        const renderPass = encoder.beginRenderPass({
-          label: "Main rendering pass",
-          colorAttachments: [{
-            view: GPUApp.context.getCurrentTexture().createView(),
-            loadOp: "clear",
-            clearValue: { r: 0, g: 0, b: 0, a: 1 },
-            storeOp: "store",
-          }],
-          sampleCount: 1,
-          depthStencilAttachment: {
-            view: GPUApp.depthTexture.createView(),
-            depthClearValue: 1.0,
-            depthLoadOp: "clear",
-            depthStoreOp: "store",
-          },
-        });
-        renderPass.setPipeline(GPUApp.rasterizationPipeline);
-        renderPass.setBindGroup(0, GPUApp.bindGroup);
-        renderPass.setVertexBuffer(0, GPUApp.meshBuffers.positionBuffer);
-        renderPass.setVertexBuffer(1, GPUApp.meshBuffers.normalBuffer);
-        renderPass.setVertexBuffer(2, GPUApp.meshBuffers.colorBuffer);
-        renderPass.setVertexBuffer(3, GPUApp.meshBuffers.uvBuffer);
-        renderPass.setIndexBuffer(GPUApp.meshBuffers.indexBuffer, GPUApp.meshBuffers.indexFormat);
-        renderPass.drawIndexed(scene.mesh.indices.length);
-        renderPass.end();
+        if (debugView == "none") {
+          const renderPass = encoder.beginRenderPass({
+            label: "Main rendering pass",
+            colorAttachments: [{
+              view: GPUApp.context.getCurrentTexture().createView(),
+              loadOp: "clear",
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              storeOp: "store",
+            }],
+            sampleCount: 1,
+            depthStencilAttachment: {
+              view: GPUApp.depthTexture.createView(),
+              depthClearValue: 1.0,
+              depthLoadOp: "clear",
+              depthStoreOp: "store",
+            },
+          });
+          renderPass.setPipeline(GPUApp.rasterizationPipeline);
+          renderPass.setBindGroup(0, GPUApp.bindGroup);
+          renderPass.setVertexBuffer(0, GPUApp.meshBuffers.positionBuffer);
+          renderPass.setVertexBuffer(1, GPUApp.meshBuffers.normalBuffer);
+          renderPass.setVertexBuffer(2, GPUApp.meshBuffers.colorBuffer);
+          renderPass.setVertexBuffer(3, GPUApp.meshBuffers.uvBuffer);
+          renderPass.setIndexBuffer(GPUApp.meshBuffers.indexBuffer, GPUApp.meshBuffers.indexFormat);
+          renderPass.drawIndexed(scene.mesh.indices.length);
+          renderPass.end();
+        }
+        else {
+          const debugPass = encoder.beginRenderPass({
+            label: "Debug pass",
+            colorAttachments: [{
+              view: GPUApp.context.getCurrentTexture().createView(),
+              loadOp: "clear",
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              storeOp: "store",
+            }],
+          });
+          debugPass.setPipeline(GPUApp.debugPipeline);
+          debugPass.setBindGroup(0, GPUApp.bindGroupForDebug);
+          debugPass.draw(6);
+          debugPass.end();
+        }
         const commandBuffer = encoder.finish();
         GPUApp.device.queue.submit([commandBuffer]);
       }
