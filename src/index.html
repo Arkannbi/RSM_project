@@ -35,8 +35,14 @@
         lightPosition : vec3<f32>,
         _pad0 : f32,
         lightColor : vec3<f32>,
-        _pad1 : f32,
+        _pad1: f32,
       };
+
+      struct Sample {
+        offset: vec2<f32>,
+        weight: f32,
+        _pad: f32,
+      }
       
       @group(0) @binding(0)
       var<uniform> uniforms : Uniforms;
@@ -55,6 +61,9 @@
 
       @group(0) @binding(5)
       var shadowSampler : sampler_comparison;
+
+      @group(0) @binding(6)
+      var<storage, read> sampleBuffer : array<Sample>;
       
       struct RasterVertexInput {
         @location(0) pos: vec3f,
@@ -72,8 +81,6 @@
         @location(3) uv: vec2f,
         @location(4) shadowPos: vec4f,
       };
-
-      const SAMPLE_COUNT = 200u;
 
       fn ambientShade(baseColor: vec3f) -> vec3f {
         const ka = 0.1;
@@ -103,20 +110,25 @@
         return ndc.xy * 0.5 + vec2(0.5);
       }
       
-      fn randomDisk(i: u32) -> vec2<f32> {
-        let angle = 6.2831853 * f32(i) / f32(SAMPLE_COUNT);
-        let radius = sqrt(f32(i) / f32(SAMPLE_COUNT));
-        return vec2(cos(angle), sin(angle)) * radius;
+      fn sample(i: u32) -> vec2<f32> {
+        return sampleBuffer[i].offset;
       }
+
+      fn weight(i: u32) -> f32 {
+        return sampleBuffer[i].weight;
+      }
+
+      const SAMPLE_COUNT = 200u; // max 400 because it's the number of samples we created
 
       fn computeIndirect(P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
         var indirect = vec3<f32>(0.0);
         let baseUV = worldToLightUV(P);
         let rsmResolution = vec2<f32>(512.0, 512.0);
-        let sampleRadius = 20.0 / rsmResolution.x; // tune this
+        let rmax = 40.0 / rsmResolution.x ; // tune this
+        var weight_sum = 0.0;
 
         for (var i: u32 = 0u; i < SAMPLE_COUNT; i++) {
-          let offset = randomDisk(i) * sampleRadius;
+          let offset = sample(i) * rmax;
           let uv = baseUV + offset;
 
           // sample RSM
@@ -125,15 +137,15 @@
           let flux = textureLoad(shadowFluxTexture, vec2i(uv * rsmResolution), 0).xyz;
 
           let dir = Pi - P;
-          let dist2 = max(dot(dir, dir), 0.001);
-          let wi = normalize(dir);
+          let norm4 = max(dot(dir, dir), 0.001);
 
-          let receiverCos = max(dot(N, wi), 0.0);
-          let emitterCos  = max(dot(Ni, -wi), 0.0);
+          let factor1 = max(dot(N, dir), 0.0);
+          let factor2  = max(dot(Ni, -dir), 0.0);
 
-          indirect += flux * receiverCos * emitterCos / dist2;
+          indirect += flux * factor1 * factor2 * weight(i) / norm4;
+          weight_sum += weight(i);
         }
-        return indirect / f32(SAMPLE_COUNT);
+        return indirect / weight_sum;
       }
 
       //-----------------------------------------------------------------------
@@ -1244,10 +1256,39 @@
         ];
       }
 
+      function randomize_samples(sample_count) {
+        const samples = new Float32Array(sample_count * 4);
+        for (let i = 0; i < sample_count; ++i) {
+          const x1 = Math.random();
+          const x2 = Math.random();
+          
+          const dx = x1 * Math.sin(2.0 * Math.PI * x2);
+          const dy = x1 * Math.cos(2.0 * Math.PI * x2);
+
+          const base = 4 * i;
+          samples[base] = dx;
+          samples[base + 1] = dy;
+          samples[base + 2] = x1 * x1;
+          samples[base + 3] = 0.0; // pad
+        }
+        return samples;
+      }
+
+      function createSampleBuffer(GPUApp) {
+        const samples = randomize_samples(400); //  we'll create the 400 samples advertised in the paper
+        return createGPUBuffer(
+          GPUApp.device,
+          samples,
+          GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        );
+      }
+
       // Create and fill the GPU buffers used to store the geometry to render
       function initGPUBuffers(GPUApp, scene) {
 
         GPUApp.meshBuffers = createMeshBuffers(GPUApp, scene.mesh);
+
+        const sampleBuffer = createSampleBuffer(GPUApp);
 
         GPUApp.uniformBuffer = createGPUBuffer(
           GPUApp.device, 
@@ -1305,6 +1346,10 @@
               minFilter: "linear",
               mipmapFilter: "linear",
             }),
+          },
+          {
+            binding: 6,
+            resource: sampleBuffer,
           }],
          });
 
@@ -1391,6 +1436,11 @@
             binding: 5,
             visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
             sampler: { type: "comparison" },
+          },
+          {
+            binding: 6,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            buffer: { type: "read-only-storage" },
           }],
         });  
 
@@ -1583,7 +1633,7 @@
       function animate(scene) {
         scene.time += 1.0;
         const angle = scene.time/40.0;
-        scene.lightSource.position = [200.0*Math.cos (angle) + 280, 280, -280.0];
+        scene.lightSource.position = [200.0*Math.sin (angle) + 280.0, 400.0, -800.0];
         lookAt(scene.lightSource.lightViewMat, scene.lightSource.position, scene.camera.target, scene.camera.up);
       }
 
