@@ -127,7 +127,7 @@
       fn worldToLightUV(worldPos: vec3<f32>) -> vec2<f32> {
         let lightClip = uniforms.lightMVP * uniforms.modelMat * vec4(worldPos, 1.0);
         let ndc = lightClip.xyz / lightClip.w;
-        return ndc.xy * 0.5 + vec2(0.5);
+        return vec2f(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
       }
       
       fn sample(i: u32) -> vec2<f32> {
@@ -140,11 +140,11 @@
 
       const SAMPLE_COUNT = 200u; // max 400 because it's the number of samples we created
 
-      fn computeIndirect(P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
+      fn computeIndirect(x: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         var indirect = vec3<f32>(0.0);
-        let baseUV = worldToLightUV(P);
+        let baseUV = worldToLightUV(x);
         let rsmResolution = vec2<f32>(512.0, 512.0);
-        let rmax = 80.0 / rsmResolution.x ; // tune this
+        let rmax = 60.0 / rsmResolution.x ; // tune this
         var weight_sum = 0.0;
 
         for (var i: u32 = 0u; i < SAMPLE_COUNT; i++) {
@@ -152,15 +152,15 @@
           let uv = baseUV + offset;
 
           // sample RSM
-          let Pi = textureLoad(shadowPositionTexture, vec2i(uv * rsmResolution), 0).xyz;
-          let Ni = textureLoad(shadowNormalTexture, vec2i(uv * rsmResolution), 0).xyz;
+          let xp = textureLoad(shadowPositionTexture, vec2i(uv * rsmResolution), 0).xyz;
+          let np = textureLoad(shadowNormalTexture, vec2i(uv * rsmResolution), 0).xyz;
           let flux = textureLoad(shadowFluxTexture, vec2i(uv * rsmResolution), 0).xyz;
 
-          let dir = Pi - P;
+          let dir = x - xp;
           let norm4 = max(dot(dir, dir), 0.001);
 
-          let factor1 = max(dot(N, dir), 0.0);
-          let factor2  = max(dot(Ni, -dir), 0.0);
+          let factor1  = max(dot(np, dir), 0.0);
+          let factor2  = max(dot(n, -dir), 0.0);
 
           indirect += flux * factor1 * factor2 * weight(i) / norm4;
           weight_sum += weight(i);
@@ -193,7 +193,7 @@
           var baseColor = input.color;
           var shadow = textureSampleCompare (shadowDepthTexture, shadowSampler, vec2f(projCoords.x, 1.0 - projCoords.y), projCoords.z - 0.00003);
           var colorResponse = shade(position, normal, baseColor, shadow);
-          colorResponse += computeIndirect(position, normal);
+          colorResponse += computeIndirect(position, normal) * baseColor / 3.14159;
           return vec4f (colorResponse, 1.0);
         }
     </script>
