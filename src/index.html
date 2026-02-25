@@ -125,7 +125,7 @@
       }
 
       fn worldToLightUV(worldPos: vec3<f32>) -> vec2<f32> {
-        let lightClip = uniforms.lightMVP * uniforms.modelMat * vec4(worldPos, 1.0);
+        let lightClip = uniforms.lightMVP * vec4(worldPos, 1.0);
         let ndc = lightClip.xyz / lightClip.w;
         return vec2f(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
       }
@@ -144,7 +144,7 @@
         var indirect = vec3<f32>(0.0);
         let baseUV = worldToLightUV(x);
         let rsmResolution = vec2<f32>(512.0, 512.0);
-        let rmax = 60.0 / rsmResolution.x ; // tune this
+        let rmax = 160.0 / rsmResolution.x ; // tune this
         var weight_sum = 0.0;
 
         for (var i: u32 = 0u; i < SAMPLE_COUNT; i++) {
@@ -156,8 +156,8 @@
           let np = textureLoad(shadowNormalTexture, vec2i(uv * rsmResolution), 0).xyz;
           let flux = textureLoad(shadowFluxTexture, vec2i(uv * rsmResolution), 0).xyz;
 
-          let dir = x - xp;
-          let norm4 = max(dot(dir, dir), 0.001);
+          let dir = (x - xp) / 560.0; // world positions in [0,1] otherwise the norm makes everything too small
+          let norm4 = max(dot(dir, dir) * dot(dir, dir), 0.001);
 
           let factor1  = max(dot(np, dir), 0.0);
           let factor2  = max(dot(n, -dir), 0.0);
@@ -180,7 +180,7 @@
           output.normal = input.normal;
           output.color = input.color;
           output.uv = input.uv;
-          output.shadowPos = uniforms.lightMVP * uniforms.modelMat * vec4f (input.pos, 1);
+          output.shadowPos = uniforms.lightMVP * vec4f (input.pos, 1);
           return output;
         }
 
@@ -234,9 +234,9 @@
       @vertex
         fn shadowVertexMain(input: ShadowVertexInput) -> ShadowVertexOutput {
           var output: ShadowVertexOutput;
-          output.builtInPos = uniforms.lightMVP * uniforms.modelMat * vec4f (input.pos, 1);
-          output.position = uniforms.modelMat * vec4f (input.pos, 1);
-          output.normal = uniforms.modelMat * vec4f (input.normal, 1.0);
+          output.builtInPos = uniforms.lightMVP * vec4f (input.pos, 1);
+          output.position = vec4f (input.pos, 1);
+          output.normal = vec4f (input.normal, 1.0);
           output.color = vec4f (input.color * uniforms.lightColor, 1.0);
           return output;
         }
@@ -319,7 +319,7 @@
             color = vec4f(vec3f(normalized), 1.0);
           } else if (uniforms.debugView == 2u) { 
             let texture = textureLoad (shadowPositionTexture, vec2i(uvFlipped * vec2f(textureDimensions(shadowPositionTexture))), 0);
-            let normalized = (texture.xyz + vec3f(500.0, 500.0, 500.0)) / vec3f(1000.0, 1000.0, 1000.0); // I need to find a better, generalized way to map to [0, 1]
+            let normalized = texture.xyz / vec3f(560.0, 560.0, 560.0); // I need to find a better, generalized way to map to [0, 1]
             color = vec4f(normalized, 1.0);
           } else if (uniforms.debugView == 3u) {
             let texture = textureLoad (shadowNormalTexture, vec2i(uvFlipped * vec2f(textureDimensions(shadowNormalTexture))), 0);
@@ -1170,7 +1170,7 @@
           shadowPositionTexture: {},
           shadowNormalTexture: {},
           shadowFluxTexture: {},
-          // Model/View/Inverse View/Projection matrix (16 floats each), light position (3+1 pad floats), color (3+1 pad float), fov  (1+3 pad float), aspectRatio (1+3 pad fsloat)
+          // Data to be passed to the GPU
           uniformData : new Float32Array(76),
           uniformDataForShadow : new Float32Array(16+16+4+4+4),
           uniformDataForDebug : new Uint32Array(32),
@@ -1672,7 +1672,8 @@
 
       function updateUniforms(GPUApp, scene) {
         updateCamera(scene.camera);
-        let lightMVP = mat4Multiply(scene.lightSource.lightProjMat, scene.lightSource.lightViewMat);
+        let lightMVP = mat4Multiply(scene.lightSource.lightViewMat, scene.camera.modelMat);
+        lightMVP = mat4Multiply(scene.lightSource.lightProjMat, lightMVP);
         GPUApp.uniformData.set(scene.camera.modelMat, 0);
         GPUApp.uniformData.set(scene.camera.viewMat, 16);
         GPUApp.uniformData.set(scene.camera.projMat, 32);
@@ -1698,7 +1699,8 @@
       }
 
       function updateUniformsForShadow(GPUApp, scene) {
-        let lightMVP = mat4Multiply(scene.lightSource.lightProjMat, scene.lightSource.lightViewMat);
+        let lightMVP = mat4Multiply(scene.lightSource.lightViewMat, scene.camera.modelMat);
+        lightMVP = mat4Multiply(scene.lightSource.lightProjMat, lightMVP);
         GPUApp.uniformDataForShadow.set(lightMVP, 0);
         GPUApp.uniformDataForShadow.set(scene.camera.modelMat, 16);
         GPUApp.uniformDataForShadow.set(scene.lightSource.color, 32);
