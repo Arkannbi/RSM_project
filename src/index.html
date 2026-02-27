@@ -19,6 +19,15 @@
         </select>
         <input type="checkbox" id="animateCheckbox">
         <label for="animateCheckbox">Animate</label>
+        <input type="checkbox" id="interpolationDebugCheckbox">
+        <label for="interpolationDebugCheckbox">Show Non-Interpolated Zones</label>
+        <input type="range" id="sampleSlider" min="1" max="600" value="400">
+        <label for="sampleSlider">Samples: <span id="sampleValue">400</span></label>
+        <script>
+          document.getElementById("sampleSlider").addEventListener("input", (e) => {
+            document.getElementById("sampleValue").textContent = e.target.value;
+          });
+        </script>
       </div>
     </div>
     <div style = "text-align:left;">
@@ -38,6 +47,9 @@
         _pad1: f32,
         lightDirection : vec3<f32>,
         lightAngle : f32,
+        canvasDimensions : vec2<f32>,
+        numSamples : f32,
+        interpolationDebug : f32,
       };
 
       struct Sample {
@@ -93,8 +105,7 @@
         @location(4) shadowPos: vec4f,
       };
 
-      const canvasSize = vec2f(1024.0, 768.0);
-      const lowResSize = canvasSize / 4.0;
+      const MAX_SAMPLE_COUNT = 600u; // because it's the number of samples we created
       const NORMAL_THRESHOLD = 0.9;
       const DISTANCE_THRESHOLD = 0.25;
 
@@ -158,8 +169,6 @@
         return sampleBuffer[i].weight;
       }
 
-      const SAMPLE_COUNT = 200u; // max 400 because it's the number of samples we created
-
       fn computeIndirect(x: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         var indirect = vec3<f32>(0.0);
         let baseUV = worldToLightUV(x);
@@ -167,7 +176,10 @@
         let rmax = 160.0 / rsmResolution.x ; // tune this
         var weight_sum = 0.0;
 
-        for (var i: u32 = 0u; i < SAMPLE_COUNT; i++) {
+        for (var i: u32 = 0u; i < MAX_SAMPLE_COUNT; i++) {
+          if (i >= u32(uniforms.numSamples)) {
+            break;
+          }
           let offset = sample(i) * rmax;
           let uv = baseUV + offset;
 
@@ -189,6 +201,7 @@
       }
 
       fn interpolateIndirect(x: vec3<f32>, n: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+        let lowResSize = uniforms.canvasDimensions / 4.0;
         let coord = uv * lowResSize;
         let base = floor(coord);
         let dx = coord - base;
@@ -246,12 +259,16 @@
           var colorResponse = shade(position, normal, baseColor, shadow);
           var baseUV = worldToCameraUV(position);
           var interpolationAttempt = interpolateIndirect(position, normal, baseUV);
-          if (interpolationAttempt.x >= 0.0) {
+          if (interpolationAttempt.x >= 0.0) { // it can't be negative if it's valid since it's supposed to be a color
             colorResponse += interpolationAttempt;
           }
           else {
-            colorResponse += computeIndirect(position, normal) * baseColor / 3.14159;
-            // colorResponse = vec3f(1.0, 0.0, 0.0); // to visualize where interpolation fails
+            if (uniforms.interpolationDebug > 0.5) {
+              colorResponse = vec3f(1.0, 0.0, 0.0);
+            }
+            else {
+              colorResponse += computeIndirect(position, normal) * baseColor / 3.14159;
+            }
           }
           return vec4f (colorResponse, 1.0);
         }
@@ -400,6 +417,8 @@
         modelMat : mat4x4<f32>,
         viewMat : mat4x4<f32>,
         projMat : mat4x4<f32>,
+        numSamples : f32,
+        _pad0 : f32,
       };
 
       struct Sample {
@@ -462,7 +481,7 @@
         return sampleBuffer[i].weight;
       }
 
-      const SAMPLE_COUNT = 400u; // max 600 because it's the number of samples we created
+      const MAX_SAMPLE_COUNT = 600u; // because it's the number of samples we created
 
       fn computeIndirect(x: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         var indirect = vec3<f32>(0.0);
@@ -471,7 +490,10 @@
         let rmax = 160.0 / rsmResolution.x ; // tune this
         var weight_sum = 0.0;
 
-        for (var i: u32 = 0u; i < SAMPLE_COUNT; i++) {
+        for (var i: u32 = 0u; i < MAX_SAMPLE_COUNT; i++) {
+          if (i >= u32(uniforms.numSamples)) {
+            break;
+          }
           let offset = sample(i) * rmax;
           let uv = baseUV + offset;
 
@@ -1368,10 +1390,10 @@
           lowResNormalTexture: {},
           lowResPositionTexture: {},
           // Data to be passed to the GPU
-          uniformData : new Float32Array(76),
+          uniformData : new Float32Array(80),
           uniformDataForShadow : new Float32Array(16+16+4+4+4),
           uniformDataForDebug : new Uint32Array(32),
-          uniformDataForIllumination : new Float32Array(16+16+16+16),
+          uniformDataForIllumination : new Float32Array(16+16+16+16+4),
         };
         GPUApp.canvas = document.querySelector("canvas"),
         GPUApp.adapter = await navigator.gpu.requestAdapter();
@@ -2019,6 +2041,12 @@
         ];
         GPUApp.uniformData.set(scene.lightSource.lightDirection, 72);
         GPUApp.uniformData[75] = scene.lightSource.lightAngle;
+        let canvasDimensions = [GPUApp.canvas.width, GPUApp.canvas.height];
+        GPUApp.uniformData.set(canvasDimensions, 76);
+        const numSamples = parseInt(document.getElementById("sampleSlider").value);
+        const interpolationDebug = document.getElementById("interpolationDebugCheckbox").checked;
+        GPUApp.uniformData[78] = numSamples;
+        GPUApp.uniformData[79] = interpolationDebug ? 1.0 : 0.0;
         GPUApp.device.queue.writeBuffer(
           GPUApp.uniformBuffer,
           0,
@@ -2066,6 +2094,8 @@
         GPUApp.uniformDataForIllumination.set(scene.camera.modelMat, 16);
         GPUApp.uniformDataForIllumination.set(scene.camera.viewMat, 32);
         GPUApp.uniformDataForIllumination.set(scene.camera.projMat, 48);
+        const numSamples = parseInt(document.getElementById("sampleSlider").value);
+        GPUApp.uniformDataForIllumination[64] = numSamples;
         GPUApp.device.queue.writeBuffer(
           GPUApp.uniformBufferForIllumination,
           0,
