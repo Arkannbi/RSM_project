@@ -16,6 +16,7 @@
           <option value="position">Shadow Position</option>
           <option value="normal">Shadow Normal</option>
           <option value="flux">Shadow Flux</option>
+          <option value="lowResNormals">Low Resolution</option>
         </select>
         <input type="checkbox" id="animateCheckbox">
         <label for="animateCheckbox">Animate</label>
@@ -66,6 +67,15 @@
 
       @group(0) @binding(6)
       var<storage, read> sampleBuffer : array<Sample>;
+
+      @group(0) @binding(7)
+      var lowResIlluminationTexture : texture_2d<f32>;
+
+      @group(0) @binding(8)
+      var lowResNormalTexture : texture_2d<f32>;
+
+      @group(0) @binding(9)
+      var lowResPositionTexture : texture_2d<f32>;
       
       struct RasterVertexInput {
         @location(0) pos: vec3f,
@@ -83,6 +93,11 @@
         @location(3) uv: vec2f,
         @location(4) shadowPos: vec4f,
       };
+
+      const canvasSize = vec2f(1024.0, 768.0);
+      const lowResSize = canvasSize / 4.0;
+      const NORMAL_THRESHOLD = 0.9;
+      const DISTANCE_THRESHOLD = 0.25;
 
       fn attenuation(dist: f32, coneDecay: f32) -> f32 {
           let k1 = 0.0001;
@@ -127,7 +142,13 @@
       fn worldToLightUV(worldPos: vec3<f32>) -> vec2<f32> {
         let lightClip = uniforms.lightMVP * vec4(worldPos, 1.0);
         let ndc = lightClip.xyz / lightClip.w;
-        return vec2f(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+        return vec2f(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5)); // Textures are always upside down for some reason
+      }
+
+      fn worldToCameraUV(worldPos: vec3<f32>) -> vec2<f32> {
+        let clip = uniforms.projMat * uniforms.viewMat * vec4(worldPos, 1.0);
+        let ndc = clip.xyz / clip.w;
+        return vec2f(ndc.x * 0.5 + 0.5, ndc.y * 0.5 + 0.5);
       }
       
       fn sample(i: u32) -> vec2<f32> {
@@ -168,6 +189,37 @@
         return indirect / weight_sum;
       }
 
+      fn interpolateIndirect(x: vec3<f32>, n: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+        let coord = uv * lowResSize;
+        let base = floor(coord);
+        let dx = coord - base;
+        
+        var inter = vec3<f32>(0.0);
+        var weight_sum = 0.0;
+        var validSamples = 0u;
+
+        for (var i: u32 = 0u; i < 2u; i++) {
+          for (var j: u32 = 0u; j < 2u; j++) {
+            let offset = vec2f(f32(i), f32(j));
+            let sampleUV = (base + offset) / lowResSize;
+            let sampleNormal = textureLoad(lowResNormalTexture, vec2i(base + offset), 0).xyz;
+            let samplePosition = textureLoad(lowResPositionTexture, vec2i(base + offset), 0).xyz;
+
+            if (dot(sampleNormal, n) > NORMAL_THRESHOLD && length(samplePosition - x)/560.0 < DISTANCE_THRESHOLD) {
+              let sampleIllumination = textureLoad(lowResIlluminationTexture, vec2i(base + offset), 0).xyz;
+              let w = (1.0 - dx.x) * (1.0 - dx.y);
+              inter += w * sampleIllumination;
+              weight_sum += w;
+              validSamples++;
+            }
+          }
+        }
+        if (validSamples > 3u && weight_sum > 0.0) {
+          return inter / weight_sum;
+        } else {
+          return vec3<f32>(-1.0);
+        }
+      }
       //-----------------------------------------------------------------------
       // Rasterization shaders 
       //-----------------------------------------------------------------------
@@ -176,7 +228,7 @@
         fn rasterVertexMain(input: RasterVertexInput) -> RasterVertexOutput {
           var output: RasterVertexOutput;
           output.builtInPos = uniforms.projMat * uniforms.viewMat * uniforms.modelMat * vec4f (input.pos, 1);
-          output.position = input.pos;
+          output.position = (uniforms.modelMat * vec4f(input.pos, 1.0)).xyz;
           output.normal = input.normal;
           output.color = input.color;
           output.uv = input.uv;
@@ -193,7 +245,14 @@
           var baseColor = input.color;
           var shadow = textureSampleCompare (shadowDepthTexture, shadowSampler, vec2f(projCoords.x, 1.0 - projCoords.y), projCoords.z - 0.00003);
           var colorResponse = shade(position, normal, baseColor, shadow);
-          colorResponse += computeIndirect(position, normal) * baseColor / 3.14159;
+          var baseUV = worldToCameraUV(position);
+          var interpolationAttempt = interpolateIndirect(position, normal, baseUV);
+          if (interpolationAttempt.x >= 0.0) {
+            colorResponse += interpolationAttempt;
+          }
+          else {
+            colorResponse += computeIndirect(position, normal) * baseColor / 3.14159;
+          }
           return vec4f (colorResponse, 1.0);
         }
     </script>
@@ -216,6 +275,7 @@
         @location(0) pos: vec3f,
         @location(1) normal: vec3f,
         @location(2) color: vec3f,
+        @location(3) uv: vec2f,
       };
 
       struct ShadowVertexOutput {
@@ -235,7 +295,7 @@
         fn shadowVertexMain(input: ShadowVertexInput) -> ShadowVertexOutput {
           var output: ShadowVertexOutput;
           output.builtInPos = uniforms.lightMVP * vec4f (input.pos, 1);
-          output.position = vec4f (input.pos, 1);
+          output.position = uniforms.modelMat * vec4f (input.pos, 1);
           output.normal = vec4f (input.normal, 1.0);
           output.color = vec4f (input.color * uniforms.lightColor, 1.0);
           return output;
@@ -277,6 +337,9 @@
 
       @group(0) @binding(4)
       var shadowFluxTexture : texture_2d<f32>;
+
+      @group(0) @binding(5)
+      var lowResNormalTexture : texture_2d<f32>;
 
       struct DebugVertexOutput {
         @builtin(position) builtInPos : vec4f,
@@ -327,8 +390,132 @@
             color = vec4f(normalized, 1.0);
           } else if (uniforms.debugView == 4u) {
             color = textureLoad (shadowFluxTexture, vec2i(uvFlipped * vec2f(textureDimensions(shadowFluxTexture))), 0);
+          } else if (uniforms.debugView == 5u) {
+            color = textureLoad (lowResNormalTexture, vec2i(uvFlipped * vec2f(textureDimensions(lowResNormalTexture))), 0);
           }
           return color;
+        }
+    </script>
+    <script type="x-shader/wgsl" id="illumination-shaders">
+      struct Uniforms {
+        modelMat : mat4x4<f32>,
+        viewMat : mat4x4<f32>,
+        projMat : mat4x4<f32>,
+        lightMVP : mat4x4<f32>,
+      };
+
+      struct Sample {
+        offset: vec2<f32>,
+        weight: f32,
+        _pad: f32,
+      }
+      
+      @group(0) @binding(0)
+      var<uniform> uniforms : Uniforms;
+
+      @group(0) @binding(1)
+      var shadowDepthTexture : texture_depth_2d;
+        
+      @group(0) @binding(2)
+      var shadowPositionTexture : texture_2d<f32>;
+
+      @group(0) @binding(3)
+      var shadowNormalTexture : texture_2d<f32>;
+
+      @group(0) @binding(4)
+      var shadowFluxTexture : texture_2d<f32>;
+
+      @group(0) @binding(5)
+      var<storage, read> sampleBuffer : array<Sample>;
+      
+      struct IlluminationVertexInput {
+        @location(0) pos: vec3f,
+        @location(1) normal: vec3f,
+        @location(2) color: vec3f,
+        @location(3) uv: vec2f,
+        @builtin(instance_index) instance: u32
+      };
+  
+      struct IlluminationVertexOutput {
+        @builtin(position) builtInPos : vec4f,
+        @location(0) position: vec3f,
+        @location(1) normal: vec3f,
+        @location(2) color: vec3f,
+        @location(3) uv: vec2f,
+      };
+
+      struct IlluminationFragmentOutput {
+        @location(0) color: vec4f,
+        @location(1) normal: vec4f,
+        @location(2) worldPos: vec4f,
+      }
+
+      fn worldToLightUV(worldPos: vec3<f32>) -> vec2<f32> {
+        let lightClip = uniforms.lightMVP * vec4(worldPos, 1.0);
+        let ndc = lightClip.xyz / lightClip.w;
+        return vec2f(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+      }
+      
+      fn sample(i: u32) -> vec2<f32> {
+        return sampleBuffer[i].offset;
+      }
+
+      fn weight(i: u32) -> f32 {
+        return sampleBuffer[i].weight;
+      }
+
+      const SAMPLE_COUNT = 200u; // max 400 because it's the number of samples we created
+
+      fn computeIndirect(x: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+        var indirect = vec3<f32>(0.0);
+        let baseUV = worldToLightUV(x);
+        let rsmResolution = vec2<f32>(512.0, 512.0);
+        let rmax = 160.0 / rsmResolution.x ; // tune this
+        var weight_sum = 0.0;
+
+        for (var i: u32 = 0u; i < SAMPLE_COUNT; i++) {
+          let offset = sample(i) * rmax;
+          let uv = baseUV + offset;
+
+          // sample RSM
+          let xp = textureLoad(shadowPositionTexture, vec2i(uv * rsmResolution), 0).xyz;
+          let np = textureLoad(shadowNormalTexture, vec2i(uv * rsmResolution), 0).xyz;
+          let flux = textureLoad(shadowFluxTexture, vec2i(uv * rsmResolution), 0).xyz;
+
+          let dir = (x - xp) / 560.0; // world positions in [0,1] otherwise the norm makes everything too small
+          let norm4 = max(dot(dir, dir) * dot(dir, dir), 0.001);
+
+          let factor1  = max(dot(np, dir), 0.0);
+          let factor2  = max(dot(n, -dir), 0.0);
+
+          indirect += flux * factor1 * factor2 * weight(i) / norm4;
+          weight_sum += weight(i);
+        }
+        return indirect / weight_sum;
+      }
+      
+      @vertex
+        fn illuminationVertexMain(input: IlluminationVertexInput) -> IlluminationVertexOutput {
+          var output: IlluminationVertexOutput;
+          output.builtInPos = uniforms.projMat * uniforms.viewMat * uniforms.modelMat * vec4f (input.pos, 1);
+          output.position = (uniforms.modelMat * vec4f(input.pos, 1.0)).xyz;
+          output.normal = input.normal;
+          output.color = input.color;
+          output.uv = input.uv;
+          return output;
+        }
+
+      @fragment
+        fn illuminationFragmentMain(input: IlluminationVertexOutput) -> IlluminationFragmentOutput {
+          var output: IlluminationFragmentOutput;
+          var normal = normalize (input.normal);
+          output.normal = vec4f (normal, 1.0);
+          var position = input.position;
+          output.worldPos = vec4f (position, 1.0);
+          var baseColor = input.color;
+          var colorResponse = computeIndirect(position, normal) * baseColor / 3.14159;
+          output.color = vec4f (colorResponse, 1.0);
+          return output;
         }
     </script>
     <script type="module">
@@ -1139,29 +1326,35 @@
           uniformBuffer: {},
           uniformBufferForShadow: {},
           uniformBufferForDebug: {},
+          uniformBufferForIllumination: {},
           // Handle on GPU parameters
           bindGroup: {},
           bindGroupForShadow: {},
           bindGroupForDebug: {},
+          bindGroupForIllumination: {},
           // Handle on the GPU shaders
           shaderModule: {},
           // Shadow code used for rendering
           shadowShaderModule: {},
           // Debug code
           debugShaderModule: {},
+          // Indirect illumination code
+          illuminationShaderModule: {},
           // Organization of the input of the pipeline/vertex shader
           vertexBuffersLayout: {},
-          vertexBuffersLayoutForShadow: {},
           // Organization of the 
           bindGroupLayout: {},
           bindGroupLayoutForShadow: {},
           bindGroupLayoutForDebug: {},
+          bindGroupLayoutForIllumination: {},
           // Rasterization pipeline
           rasterizationPipeline: {},
           // Shadow pipeline
           shadowPipeline: {},
           // Debug pipeline (to simulate the first images of the paper and help in debugging)
           debugPipeline: {},
+          // Low resolution solve for indirect illumination
+          illuminationPipeline: {},
           // Depth map used to store per-pixel depth (Z-Buffer)
           depthTexture: {},
           // Shadow depth map
@@ -1170,10 +1363,15 @@
           shadowPositionTexture: {},
           shadowNormalTexture: {},
           shadowFluxTexture: {},
+          // Indirect low-res illumination texture
+          lowResIlluminationTexture: {},
+          lowResNormalTexture: {},
+          lowResPositionTexture: {},
           // Data to be passed to the GPU
           uniformData : new Float32Array(76),
           uniformDataForShadow : new Float32Array(16+16+4+4+4),
           uniformDataForDebug : new Uint32Array(32),
+          uniformDataForIllumination : new Float32Array(16+16+16+16),
         };
         GPUApp.canvas = document.querySelector("canvas"),
         GPUApp.adapter = await navigator.gpu.requestAdapter();
@@ -1237,29 +1435,6 @@
         };
       }
 
-      function createVertexBuffersLayoutForShadow() {
-        return [
-          {
-            arrayStride: 3 * 4,
-            attributes: [
-              { shaderLocation: 0, offset: 0, format: "float32x3" } // position
-            ]
-          },
-          {
-            arrayStride: 3 * 4,
-            attributes: [
-              { shaderLocation: 1, offset: 0, format: "float32x3" } // normal
-            ]
-          },
-          {
-            arrayStride: 3 * 4,
-            attributes: [
-              { shaderLocation: 2, offset: 0, format: "float32x3" } // color
-            ]
-          }
-        ];
-      }
-      
       function createVertexBuffersLayout() {
         return [
           {
@@ -1341,6 +1516,12 @@
           GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         );
 
+        GPUApp.uniformBufferForIllumination = createGPUBuffer(
+          GPUApp.device, 
+          GPUApp.uniformDataForIllumination, 
+          GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        );
+
         GPUApp.bindGroupForShadow = GPUApp.device.createBindGroup({
           layout: GPUApp.bindGroupLayoutForShadow,
           entries: [{
@@ -1377,12 +1558,23 @@
               compare: "less",
               magFilter: "linear",
               minFilter: "linear",
-              mipmapFilter: "linear",
             }),
           },
           {
             binding: 6,
             resource: sampleBuffer,
+          },
+          {
+            binding: 7,
+            resource: GPUApp.lowResIlluminationTexture.createView(),
+          },
+          {
+            binding: 8,
+            resource: GPUApp.lowResNormalTexture.createView(),
+          },
+          {
+            binding: 9,
+            resource: GPUApp.lowResPositionTexture.createView(),
           }],
          });
 
@@ -1407,6 +1599,38 @@
           {
             binding: 4,
             resource: GPUApp.shadowFluxTexture.createView(),
+          },
+          {
+            binding: 5,
+            resource : GPUApp.lowResNormalTexture.createView(),
+          }],
+        });
+
+        GPUApp.bindGroupForIllumination = GPUApp.device.createBindGroup({
+          layout: GPUApp.bindGroupLayoutForIllumination,
+          entries: [{
+            binding: 0,
+            resource: { buffer: GPUApp.uniformBufferForIllumination },
+          },
+          {
+            binding: 1,
+            resource: GPUApp.shadowDepthTexture.createView(),
+          },
+          {
+            binding: 2,
+            resource: GPUApp.shadowPositionTexture.createView(),
+          },
+          {
+            binding: 3,
+            resource: GPUApp.shadowNormalTexture.createView(),
+          },
+          {
+            binding: 4,
+            resource: GPUApp.shadowFluxTexture.createView(),
+          },
+          {
+            binding: 5,
+            resource: sampleBuffer,
           }],
         });
       }
@@ -1415,6 +1639,7 @@
         const shaders = document.getElementById("main-shaders").textContent;
         const shadowShaders = document.getElementById("shadow-shaders").textContent;
         const debugShaders = document.getElementById("debug-shaders").textContent;
+        const illuminationShaders = document.getElementById("illumination-shaders").textContent;
         GPUApp.shaderModule = GPUApp.device.createShaderModule({
           label: "Shaders",
           code: shaders
@@ -1427,8 +1652,11 @@
           label: "Debug Shaders",
           code: debugShaders
         });
+          GPUApp.illuminationShaderModule = GPUApp.device.createShaderModule({
+            label: "Illumination Shaders",
+            code: illuminationShaders
+          });
 
-        GPUApp.vertexBuffersLayoutForShadow = createVertexBuffersLayoutForShadow();
         GPUApp.vertexBuffersLayout = createVertexBuffersLayout();
 
         GPUApp.bindGroupLayoutForShadow = GPUApp.device.createBindGroupLayout({
@@ -1474,6 +1702,21 @@
             binding: 6,
             visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
             buffer: { type: "read-only-storage" },
+          },
+          {
+            binding: 7,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
+          },
+          {
+            binding: 8,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
+          },
+          {
+            binding: 9,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
           }],
         });  
 
@@ -1502,6 +1745,44 @@
             binding: 4,
             visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
             texture: { sampleType: "float" },
+          },
+          {
+            binding: 5,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
+          }],
+        });
+
+        GPUApp.bindGroupLayoutForIllumination = GPUApp.device.createBindGroupLayout({
+          entries: [{
+            binding: 0,
+            visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+            buffer: { type: "uniform" },
+          },
+          {
+            binding: 1,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "depth" },
+          },
+          {
+            binding: 2,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
+          },
+          {
+            binding: 3,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
+          },
+          {
+            binding: 4,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            texture: { sampleType: "float" },
+          },
+          {
+            binding: 5,
+            visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+            buffer: { type: "read-only-storage" },
           }],
         });
 
@@ -1566,6 +1847,27 @@
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
 
+        const lowResWidth = Math.floor(GPUApp.canvas.width / 4);
+        const lowResHeight = Math.floor(GPUApp.canvas.height / 4);
+
+        GPUApp.lowResIlluminationTexture = GPUApp.device.createTexture({
+          size: [lowResWidth, lowResHeight],
+          format: "rgba16float",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        });
+
+        GPUApp.lowResNormalTexture = GPUApp.device.createTexture({
+          size: [lowResWidth, lowResHeight],
+          format: "rgba16float",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        });
+
+        GPUApp.lowResPositionTexture = GPUApp.device.createTexture({
+          size: [lowResWidth, lowResHeight],
+          format: "rgba16float",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        });
+
         GPUApp.shadowPipeline = GPUApp.device.createRenderPipeline({
             label: "shadowPipeline",
             //layout: "auto",
@@ -1575,7 +1877,7 @@
             vertex: {
               module: GPUApp.shadowShaderModule,
               entryPoint: "shadowVertexMain",
-              buffers: GPUApp.vertexBuffersLayoutForShadow
+              buffers: GPUApp.vertexBuffersLayout
             },
             primitive: {
               topology: "triangle-list", // use "line-list" for sanity check
@@ -1614,6 +1916,31 @@
             targets: [{
               format: GPUApp.canvasFormat
             }]
+          },
+          primitive: {
+            topology: "triangle-list", // use "line-list" for sanity check
+          },
+        });
+
+        GPUApp.illuminationPipeline = GPUApp.device.createRenderPipeline({
+          label: "illuminationPipeline",
+          //layout: "auto",
+          layout: GPUApp.device.createPipelineLayout({
+            bindGroupLayouts: [GPUApp.bindGroupLayoutForIllumination],
+          }),
+          vertex: {
+            module: GPUApp.illuminationShaderModule,
+            entryPoint: "illuminationVertexMain",
+            buffers: GPUApp.vertexBuffersLayout
+          },
+          fragment: {
+            module: GPUApp.illuminationShaderModule,
+            entryPoint: "illuminationFragmentMain",
+            targets: [
+            { format: GPUApp.lowResIlluminationTexture.format },
+            { format: GPUApp.lowResNormalTexture.format },
+            { format: GPUApp.lowResPositionTexture.format }
+          ]
           },
           primitive: {
             topology: "triangle-list", // use "line-list" for sanity check
@@ -1729,13 +2056,30 @@
         );
       }
 
+      function updateUniformsForIllumination(GPUApp, scene) {
+        let lightMVP = mat4Multiply(scene.lightSource.lightViewMat, scene.camera.modelMat);
+        lightMVP = mat4Multiply(scene.lightSource.lightProjMat, lightMVP);
+        GPUApp.uniformDataForIllumination.set(lightMVP, 0);
+        GPUApp.uniformDataForIllumination.set(scene.camera.modelMat, 16);
+        GPUApp.uniformDataForIllumination.set(scene.camera.viewMat, 32);
+        GPUApp.uniformDataForIllumination.set(scene.camera.projMat, 48);
+        GPUApp.device.queue.writeBuffer(
+          GPUApp.uniformBufferForIllumination,
+          0,
+          GPUApp.uniformDataForIllumination.buffer,
+          GPUApp.uniformDataForIllumination.byteOffset,
+          GPUApp.uniformDataForIllumination.byteLength
+        );
+      }
+
       function render(GPUApp, scene) {
         if (document.getElementById("animateCheckbox").checked)
           animate(scene);
         const debugView = document.getElementById("debugSelect").value;
         updateUniforms(GPUApp, scene);
-        updateUniformsForDebug(GPUApp, debugView == "none" ? 0 : debugView == "depth" ? 1 : debugView == "position" ? 2 : debugView == "normal" ? 3 : 4);
+        updateUniformsForDebug(GPUApp, debugView == "none" ? 0 : debugView == "depth" ? 1 : debugView == "position" ? 2 : debugView == "normal" ? 3 : debugView == "flux" ? 4 : 5);
         updateUniformsForShadow(GPUApp, scene);
+        updateUniformsForIllumination(GPUApp, scene);
         const encoder = GPUApp.device.createCommandEncoder();
         const shadowPass = encoder.beginRenderPass({
           label: "Shadow map generation pass",
@@ -1771,11 +2115,45 @@
         shadowPass.setVertexBuffer(0, GPUApp.meshBuffers.positionBuffer);
         shadowPass.setVertexBuffer(1, GPUApp.meshBuffers.normalBuffer);
         shadowPass.setVertexBuffer(2, GPUApp.meshBuffers.colorBuffer);
+        shadowPass.setVertexBuffer(3, GPUApp.meshBuffers.uvBuffer);
         shadowPass.setIndexBuffer(GPUApp.meshBuffers.indexBuffer, GPUApp.meshBuffers.indexFormat);
         shadowPass.drawIndexed(scene.mesh.indices.length);
         shadowPass.end();
+        
+        // Low res pass for indirect illumination
+        const illuminationPass = encoder.beginRenderPass({
+          label: "Indirect illumination pass",
+          colorAttachments: [{
+            view: GPUApp.lowResIlluminationTexture.createView(),
+            loadOp: "clear",
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            storeOp: "store",
+          },
+            {
+            view: GPUApp.lowResNormalTexture.createView(),
+            loadOp: "clear",
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            storeOp: "store",
+          },
+          {
+            view: GPUApp.lowResPositionTexture.createView(),
+            loadOp: "clear",
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            storeOp: "store",
+          }],
+        });
+        illuminationPass.setPipeline(GPUApp.illuminationPipeline);
+        illuminationPass.setBindGroup(0, GPUApp.bindGroupForIllumination);
+        illuminationPass.setVertexBuffer(0, GPUApp.meshBuffers.positionBuffer);
+        illuminationPass.setVertexBuffer(1, GPUApp.meshBuffers.normalBuffer);
+        illuminationPass.setVertexBuffer(2, GPUApp.meshBuffers.colorBuffer);
+        illuminationPass.setVertexBuffer(3, GPUApp.meshBuffers.uvBuffer);
+        illuminationPass.setIndexBuffer(GPUApp.meshBuffers.indexBuffer, GPUApp.meshBuffers.indexFormat);
+        illuminationPass.drawIndexed(scene.mesh.indices.length);
+        illuminationPass.end();
 
         if (debugView == "none") {
+          // Main render pass
           const renderPass = encoder.beginRenderPass({
             label: "Main rendering pass",
             colorAttachments: [{
