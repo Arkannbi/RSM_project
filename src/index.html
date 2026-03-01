@@ -5,32 +5,58 @@
     <meta charset="utf-8">
     <title>Reflective Shadow Maps</title>
   </head>
-  <body style="margin-left:20%; margin-right:20%; padding:0">
-    <div style = "text-align:center;">
+  <body style="margin-left:5%; margin-right:5%; padding:0;">
+    <div style = "display:flex; align-items:center; justify-content:center;">
       <canvas width="1024" height="768"></canvas>
-      <div style="text-align:center; margin-top:10px;">
+      <div style="display:flex; flex-direction:column; margin-left: 20px;">
         <label>Debug View:</label>
-        <select id="debugSelect">
+        <select id="debugSelect" style="margin-bottom:10px;">
           <option value="none">None</option>
           <option value="depth">Shadow Depth</option>
           <option value="position">Shadow Position</option>
           <option value="normal">Shadow Normal</option>
           <option value="flux">Shadow Flux</option>
         </select>
-        <input type="checkbox" id="animateCheckbox">
-        <label for="animateCheckbox">Animate</label>
-        <input type="checkbox" id="interpolationDebugCheckbox">
-        <label for="interpolationDebugCheckbox">Show Non-Interpolated Zones</label>
-        <input type="range" id="sampleSlider" min="1" max="600" value="400">
-        <label for="sampleSlider">Samples: <span id="sampleValue">400</span></label>
+        <label for="sampleSlider">Samples: <span id="sampleValue">200</span></label>
+        <input type="range" id="sampleSlider" min="1" max="600" value="200" style="margin-bottom:10px;">
+        <label for="sampleRangeSlider">Sample Range: <span id="sampleRangeValue">160</span></label>
+        <input type="range" id="sampleRangeSlider" min="1" max="400" step="1" value="160" style="margin-bottom:10px;">
         <script>
           document.getElementById("sampleSlider").addEventListener("input", (e) => {
             document.getElementById("sampleValue").textContent = e.target.value;
           });
+          document.getElementById("sampleRangeSlider").addEventListener("input", (e) => {
+            document.getElementById("sampleRangeValue").textContent = e.target.value;
+          });
         </script>
+        <div>
+          <input type="checkbox" id="interpolateCheckbox" checked>
+          <label for="interpolateCheckbox">Interpolate Indirect Illumination</label>
+        </div>
+        <div>
+          <input type="checkbox" id="interpolationDebugCheckbox">
+          <label id="interpolationDebugCheckboxLabel" for="interpolationDebugCheckbox">Show Non-Interpolated Zones</label>
+        </div>
+        <script>
+          document.getElementById("interpolateCheckbox").addEventListener("change", (e) => {
+            if (e.target.checked) {
+              document.getElementById("interpolationDebugCheckbox").disabled = false;
+              document.getElementById("interpolationDebugCheckboxLabel").style.color = "black";
+            } else {
+              document.getElementById("interpolationDebugCheckbox").disabled = true;
+              document.getElementById("interpolationDebugCheckbox").checked = false;
+              document.getElementById("interpolationDebugCheckboxLabel").style.color = "grey";
+            }
+          });
+        </script>
+        <div style="margin-bottom:10px;">
+          <input type="checkbox" id="animateCheckbox">
+          <label for="animateCheckbox">Animate</label>
+        </div>
       </div>
     </div>
     <div style = "text-align:left;">
+    <h1 style="text-align:center">Reflective Shadow Maps</h1>
       <p>
         Blabla
       </p>
@@ -49,6 +75,8 @@
         lightAngle : f32,
         canvasDimensions : vec2<f32>,
         numSamples : f32,
+        sampleRange : f32,
+        interpolate : f32,
         interpolationDebug : f32,
       };
 
@@ -173,7 +201,7 @@
         var indirect = vec3<f32>(0.0);
         let baseUV = worldToLightUV(x);
         let rsmResolution = vec2<f32>(512.0, 512.0);
-        let rmax = 160.0 / rsmResolution.x ; // tune this
+        let rmax = uniforms.sampleRange / rsmResolution.x ;
         var weight_sum = 0.0;
 
         for (var i: u32 = 0u; i < MAX_SAMPLE_COUNT; i++) {
@@ -189,7 +217,7 @@
           let flux = textureLoad(shadowFluxTexture, vec2i(uv * rsmResolution), 0).xyz;
 
           let dir = (x - xp) / 560.0; // world positions in [0,1] otherwise the norm makes everything too small
-          let norm4 = max(dot(dir, dir) * dot(dir, dir), 0.001);
+          let norm4 = max(dot(dir, dir) * dot(dir, dir), 0.00001);
 
           let factor1  = max(dot(np, dir), 0.0);
           let factor2  = max(dot(n, -dir), 0.0);
@@ -257,18 +285,23 @@
           var baseColor = input.color;
           var shadow = textureSampleCompare (shadowDepthTexture, shadowSampler, vec2f(projCoords.x, 1.0 - projCoords.y), projCoords.z - 0.00003);
           var colorResponse = shade(position, normal, baseColor, shadow);
-          var baseUV = worldToCameraUV(position);
-          var interpolationAttempt = interpolateIndirect(position, normal, baseUV);
-          if (interpolationAttempt.x >= 0.0) { // it can't be negative if it's valid since it's supposed to be a color
-            colorResponse += interpolationAttempt;
-          }
-          else {
-            if (uniforms.interpolationDebug > 0.5) {
-              colorResponse = vec3f(1.0, 0.0, 0.0);
+          if (uniforms.interpolate > 0.5) {
+            var baseUV = worldToCameraUV(position);
+            var interpolationAttempt = interpolateIndirect(position, normal, baseUV);
+            if (interpolationAttempt.x >= 0.0) { // it can't be negative if it's valid since it's supposed to be a color
+              colorResponse += interpolationAttempt;
             }
             else {
-              colorResponse += computeIndirect(position, normal) * baseColor / 3.14159;
+              if (uniforms.interpolationDebug > 0.5) {
+                colorResponse = vec3f(1.0, 0.0, 0.0);
+              }
+              else {
+                colorResponse += computeIndirect(position, normal) * baseColor / 3.14159;
+              }
             }
+          }
+          else {
+            colorResponse += computeIndirect(position, normal) * baseColor / 3.14159;
           }
           return vec4f (colorResponse, 1.0);
         }
@@ -330,7 +363,7 @@
           if (angleCos > cutOff) {
             emittedFlux = angleCos;
           }
-          output.flux = 0.5 * input.color * emittedFlux;
+          output.flux = 0.4 * input.color * emittedFlux;
           return output;
         }
     </script>
@@ -365,19 +398,25 @@
 
       @vertex
         fn debugVertexMain(@builtin(vertex_index) vertexIndex: u32) -> DebugVertexOutput {
-          var pos = array<vec2f, 3>(
-            vec2f(-1.0, -1.0),
-            vec2f( 3.0, -1.0),
-            vec2f(-1.0,  3.0)
+          const screenPos = array<vec2<f32>, 6>(
+              vec2f(-1.0, -1.0),
+              vec2f( 1.0, -1.0),
+              vec2f(-1.0,  1.0),
+              vec2f(-1.0,  1.0),
+              vec2f( 1.0, -1.0),
+              vec2f( 1.0,  1.0),
           );
 
-          var uv = array<vec2f, 3>(
+          var uv = array<vec2f, 6>(
             vec2f(0.0, 0.0),
-            vec2f(2.0, 0.0),
-            vec2f(0.0, 2.0)
+            vec2f(1.0, 0.0),
+            vec2f(0.0, 1.0),
+            vec2f(0.0, 1.0),
+            vec2f(1.0, 0.0),
+            vec2f(1.0, 1.0)
           );
           var output: DebugVertexOutput;
-          output.builtInPos = vec4f (pos[vertexIndex], 0, 1);
+          output.builtInPos = vec4f (screenPos[vertexIndex], 0, 1);
           output.uv = uv[vertexIndex];
           return output;
         }
@@ -418,7 +457,8 @@
         viewMat : mat4x4<f32>,
         projMat : mat4x4<f32>,
         numSamples : f32,
-        _pad0 : f32,
+        sampleRange : f32,
+        _pad0 : vec2<f32>,
       };
 
       struct Sample {
@@ -487,7 +527,7 @@
         var indirect = vec3<f32>(0.0);
         let baseUV = worldToLightUV(x);
         let rsmResolution = vec2<f32>(512.0, 512.0);
-        let rmax = 160.0 / rsmResolution.x ; // tune this
+        let rmax = uniforms.sampleRange / rsmResolution.x ;
         var weight_sum = 0.0;
 
         for (var i: u32 = 0u; i < MAX_SAMPLE_COUNT; i++) {
@@ -1202,7 +1242,7 @@
           lowResNormalTexture: {},
           lowResPositionTexture: {},
           // Data to be passed to the GPU
-          uniformData : new Float32Array(80),
+          uniformData : new Float32Array(84),
           uniformDataForShadow : new Float32Array(16+16+4+4+4),
           uniformDataForDebug : new Uint32Array(32),
           uniformDataForIllumination : new Float32Array(16+16+16+16+4),
@@ -1830,7 +1870,7 @@
       function animate(scene) {
         scene.time += 1.0;
         const angle = scene.time/40.0;
-        scene.lightSource.position = [200.0*Math.sin (angle) + 280.0, 400.0, -800.0];
+        scene.lightSource.position = [700.0*Math.cos (angle) + 280.0, 700.0, 700.0*Math.sin (angle) + 280.0];
         lookAt(scene.lightSource.lightViewMat, scene.lightSource.position, scene.camera.target, scene.camera.up);
       }
 
@@ -1856,9 +1896,13 @@
         let canvasDimensions = [GPUApp.canvas.width, GPUApp.canvas.height];
         GPUApp.uniformData.set(canvasDimensions, 76);
         const numSamples = parseInt(document.getElementById("sampleSlider").value);
-        const interpolationDebug = document.getElementById("interpolationDebugCheckbox").checked;
+        const sampleRange = parseInt(document.getElementById("sampleRangeSlider").value);
         GPUApp.uniformData[78] = numSamples;
-        GPUApp.uniformData[79] = interpolationDebug ? 1.0 : 0.0;
+        GPUApp.uniformData[79] = sampleRange;
+        const interpolation = document.getElementById("interpolateCheckbox").checked;
+        const interpolationDebug = document.getElementById("interpolationDebugCheckbox").checked;
+        GPUApp.uniformData[80] = interpolation ? 1.0 : 0.0;
+        GPUApp.uniformData[81] = interpolationDebug ? 1.0 : 0.0;
         GPUApp.device.queue.writeBuffer(
           GPUApp.uniformBuffer,
           0,
@@ -1908,6 +1952,8 @@
         GPUApp.uniformDataForIllumination.set(scene.camera.projMat, 48);
         const numSamples = parseInt(document.getElementById("sampleSlider").value);
         GPUApp.uniformDataForIllumination[64] = numSamples;
+        const sampleRange = parseInt(document.getElementById("sampleRangeSlider").value);
+        GPUApp.uniformDataForIllumination[65] = sampleRange;
         GPUApp.device.queue.writeBuffer(
           GPUApp.uniformBufferForIllumination,
           0,
