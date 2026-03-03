@@ -56,7 +56,7 @@
       </div>
     </div>
     <div>
-      <h1 style="text-align:center;">Reflective Shadow Maps - <a href="http://www.klayge.org/material/3_12/GI/rsm.pdf">Paper</a></h1>
+      <h1 style="text-align:center;">Reflective Shadow Maps - <a href="https://users.soe.ucsc.edu/~pang/160/s13/proposal/mijallen/proposal/media/p203-dachsbacher.pdf">Paper</a></h1>
         <p style="font-size:18px">
           <strong style="font-size:30px;">Instructions</strong><br><br>
           - The <strong>Debug View</strong> panel allows you to see the textures generated during the "shadow pass", ie. the rendering from the light's perspective.<br>
@@ -86,7 +86,7 @@
           To collect these 3 new textures, we need to bind them as color attachments to our shadow pass and output the corresponding values in the fragment shader of this pipeline (note that we could do the same for the depth texture instead of using the depth stencil). The position and normal textures are straight-forward, simply output the world position and normal of the fragment rendered in the shadow pass. The flux texture is a bit more tricky especially because the paper is pretty vague about its computation. I ended up using just a 0.5 reflection coefficient multiplied by the color of the fragment, cut off by the angle between the light direction and the normal to only have flux for surfaces facing the light. This is surely not physically accurate or maybe even what they did in the paper but it yields a similar texture and feels reasonable to me. The cut off especially is a stretch from the paper since it's clearly not what they did but I figured it was more logical for a spot light since surfaces outside of the cone angle shouldn't reflect any light.<br>
           We can now send these textures to the main pass as <em>texture_2d</em> objects and sample them to compute the indirect illumination with the paper's formula for irradiance. This is the <em>computeIndirect</em> function's main loop in the shader code. <br><br>
           <strong style="font-size:20px;"><em>III/ Sampling</em></strong><br><br>
-          Even though the sampling principle seems pretty simple, it is not completely trivial to implement. The idea is that, for a pixel in the light's viewpoint, we want to sum the contributions of surrounding pixels to get a good approximation of the incoming radiance at this point. But we can't add every single pixel's contribution as it would be way too expensive. So instead, we generate two random floats between 0 and 1, each corresponding to an offset in polar coordinates. We then sum the contributions and weigh them by the square of the first random variable. But we can't do randomization on the GPU, so we have to pre-generate a list of random samples on the CPU and send it to the GPU as a storage buffer. In my code, I created 600 samples since it costs nothing to create them. These samples contain the offset that we randomly generated (between -1 and 1), which will be multiplied by the sample range to get the offset in the texture, and its corresponding weight. Then, in the shader, we just have to loop through these samples and sum their contribution to get the final indirect illumination. And now we have the full <em>computeIndirect</em> function implemented. <br>
+          Even though the sampling principle seems pretty simple, it is not completely trivial to implement. What we have to do is, for a pixel in the light's viewpoint, to sum the contributions of surrounding pixels to get a good approximation of the incoming radiance at this point. But we can't add every single pixel's contribution as it would be way too expensive. So instead, we generate two random floats between 0 and 1, each corresponding to an offset in polar coordinates. We then sum the contributions and weigh them by the square of the first random variable. But we can't do randomization on the GPU, so we have to pre-generate a list of random samples on the CPU and send it to the GPU as a storage buffer. In my code, I created 600 of them. This array contain the offsets that we randomly generated (between -1 and 1), which will be multiplied by the sample range and added to the UV coordinate to get the sample in the texture, and their corresponding weights. Then, in the shader, we just have to loop through these samples and sum their contribution to get the final indirect illumination. And now we have the full <em>computeIndirect</em> function implemented. <br>
         </p>
         <div style="display:flex; align-items:center; justify-content:right">
           <p style="margin-right:20px; font-size:18px;">
@@ -96,9 +96,20 @@
         </div><br>
         <p style="font-size:18px">
           <strong style="font-size:20px;"><em>IV/ Interpolation Scheme</em></strong><br><br>
-          blabla
+          The issue of our method is that, even with the sampling scheme, it is still pretty expensive. With 400 samples and my Intel Iris Xe, the frame rate drops below 10 fps. Luckily, the paper describes an interpolation scheme to avoid looping over all the samples for every pixel, which is the heavy operation. The idea is to compute the indirect illumination just as before, but for a low-resolution version of the final image, 256x192 in my case, and then render each fragment in the full resolution image by interpolating the indirect illumination from the 4 surrounding samples in the low-res version. To do that, I created another render pass after the shadow pass that renders the scene from the camera's perspective but only outputs the indirect illumination in a low resolution texture. Then, in the main render pass, I sample this low-res texture and interpolate the indirect illumination for each fragment except those whose normal and world position vary too much from at least 2 of the 4 surrounding samples, in which case I compute the indirect illumination the old way.<br><br>
         </p>
-      </div>
+        <div style="display:flex; align-items:center; justify-content:right">
+          <img src="../imgs/inerpolation_stairs.png" style="width:400px; margin-right:20px; margin-top:10px;">
+          <p style="font-size:18px;">
+            And the result is the scene you can interact with at the top of this page. It runs pretty smoothly at 400 samples, even with the dragon which is about 14K triangles while it was laggy even with the basic cornell box of the assignments without interpolation.<br>
+            An important flaw : You can see some stair effect in sharp edges of the dragon especially when you lower the sample range (expected as a small sample range means more variation from one pixel to the other). This shows that depending on the scene the interpolation scheme will be more or less effective, and if you're looking for quality you might have to disable the interpolation. But in general it significantly boosts performance in smooth areas at the cost of a bit of quality in places where normal variation is too high.<br><br>
+          </p>
+        </div><br>
+        <p style="font-size:18px;">
+          <strong style="font-size:20px;"><em>V/ Conclusion</em></strong><br><br>
+          The RSM method yields a rough approximation of one-bounce global illumination in a 3D scene. It's pretty efficient and simple to implement, especially thanks to the interpolation scheme, but it has its limitations. Firstly, it shares its flaws with shadow mapping, such as aliasing, particularly because for performance the reflective shadow map cannot have a very high resolution. Even with 1024x1024 it gets considerably more laggy. Secondly, it gets significantly heavier in scenes with many triangles, and could be limited in the number of samples used to compute the indirect illumination. Still, with modern GPUs and some optimization on any scene's geometry, this is surely usable in real-time applications but doesn't get near photorealistic quality especially in sharp, very dynamic scenes.
+        </p>
+        </div>
     <script type="x-shader/wgsl" id="main-shaders">
       struct Uniforms {
         modelMat : mat4x4<f32>,
@@ -1725,27 +1736,30 @@
           usage: GPUTextureUsage.RENDER_ATTACHMENT,
         });
 
+        const shadowMapWidth = 512;
+        const shadowMapHeight = shadowMapWidth;
+
         // Texture used for the shadow map
         GPUApp.shadowDepthTexture = GPUApp.device.createTexture({
-          size: [512, 512],
+          size: [shadowMapWidth, shadowMapHeight],
           format: "depth32float",
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
 
         GPUApp.shadowPositionTexture = GPUApp.device.createTexture({
-          size: [512, 512],
+          size: [shadowMapWidth, shadowMapHeight],
           format: "rgba16float",
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
 
         GPUApp.shadowNormalTexture = GPUApp.device.createTexture({
-          size: [512, 512],
+          size: [shadowMapWidth, shadowMapHeight],
           format: "rgba16float",
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
 
         GPUApp.shadowFluxTexture = GPUApp.device.createTexture({
-          size: [512, 512],
+          size: [shadowMapWidth, shadowMapHeight],
           format: "rgba16float",
           usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
