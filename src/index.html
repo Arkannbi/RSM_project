@@ -96,7 +96,7 @@
       </p>
       <div style="display:flex; align-items:center; justify-content:right">
         <p style="margin-right:20px; font-size:18px;">
-          Here is the result with 400 samples and a sample range of 160. Note that the number 400 was advertised by the paper to be the minimum for acceptable quality, but I found that 200 was enough to have a good approximation while still being pretty fast in this scene. As for the sample range, I just tested several values and found that 160 yielded the best result for this scene in my opinion, but no information was given in the paper about this. We can indeed see what the paper describes and shows : the colors of the walls reflecting on the dragon inside of the box. We do see some kind of artifacts especially when the light goes through a wall from behind (like the red wall in the image) and in the corners, but they are to be expected from this rough approximation of global illumination.
+          Here is the result with 400 samples and a sample range of 160. Note that the number 400 was advertised by the paper to be the minimum for acceptable quality, but I found that 200 was enough to have a good approximation while still being pretty fast in this scene. As for the sample range, I just tested several values and found that 160 yielded the best result for this scene in my opinion, but no information was given in the paper about this. We can indeed see what the paper describes and shows : the colors of the walls reflecting on the dragon inside of the box. Do not worry about the clearer part of the red wall behind, that's because the light goes through the wall from behind so it receives indirect illumination because its position is visible from the light even though it's backface-culled. If the light was in the box this wouldn't appear. This is simply the best set of spot light parameters I found for the scene to look good.
         </p>
         <img src="../imgs/reflective_shadow_map_result.png" style="width:400px; margin-left:20px; margin-top:10px;">
       </div><br>
@@ -105,11 +105,17 @@
         The issue of our method is that, even with the sampling scheme, it is still pretty expensive. With 400 samples and my Intel Iris Xe, the frame rate drops below 10 fps. Luckily, the paper describes an interpolation scheme to avoid looping over all the samples for every pixel, which is the heavy operation. The idea is to compute the indirect illumination just as before, but for a low-resolution version of the final image, 256x192 in my case, and then render each fragment in the full resolution image by interpolating the indirect illumination from the 4 surrounding samples in the low-res version. To do that, I created another render pass after the shadow pass that renders the scene from the camera's perspective but only outputs the indirect illumination in a low resolution texture. Then, in the main render pass, I sample this low-res texture and interpolate the indirect illumination for each fragment except those whose normal and world position vary too much from at least 2 of the 4 surrounding samples, in which case I compute the indirect illumination the old way. This is the <em>interpolateIndirect</em> function in the shader code, which returns the interpolated value for the indirect illumination, or a vector full of -1 if the interpolation fails.<br><br>
       </p>
       <div style="display:flex; align-items:center; justify-content:right">
-        <img src="../imgs/inerpolation_stairs.png" style="width:400px; margin-right:20px; margin-top:10px;">
+        <img src="../imgs/interpolation_result.png" style="width:400px; margin-right:20px; margin-top:10px;">
         <p style="font-size:18px;">
-          And the result is the scene you can interact with at the top of this page. It runs pretty smoothly at 400 samples, even with the dragon which is about 14K triangles while it was laggy even with the basic cornell box of the assignments without interpolation.<br>
-          An important flaw : you can see some stair effect in sharp edges of the dragon especially when you lower the sample range (expected as a small sample range means more variation from one pixel to the other). This shows that depending on the scene the interpolation scheme will be more or less effective, and if you're looking for quality you might have to disable the interpolation. But in general it significantly boosts performance in smooth areas at the cost of a bit of quality in places where normal variation is too high.<br><br>
+          And the result is the scene you can interact with at the top of this page. It runs pretty smoothly at 400 samples, even with the dragon which is about 14K triangles while on my laptop it was laggy even with the basic cornell box of the assignments without interpolation. Note that with a good GPU the interpolation might not be necessary to reach interactive performance.<br>
+          You can see that there is no visible loss of quality when keeping 160 for the sample range and 400 for the sample number.
         </p>
+      </div><br>
+      <div style="display:flex; align-items:center; justify-content:right">
+        <p style="font-size:18px;">
+          However, when reducing the sample range, the interpolation scheme becomes less effective and you can see some pixelation effects when there are sharp changes of color. So, depending on the result you are looking for, the interpolation scheme might be more or less effective, but for a reasonable set of parameters it works great (the sample range I took would give a weird result without interpolation anyway). 
+        </p>
+        <img src="../imgs/pixelized_result.png" style="width:400px; margin-right:20px; margin-top:10px;">
       </div><br>
       <p style="font-size:18px;">
         <strong style="font-size:20px;"><em>V/ Conclusion</em></strong><br><br>
@@ -243,11 +249,11 @@
         return vec2f(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
       }
       
-      fn sample(i: u32) -> vec2<f32> {
+      fn sampleOffset(i: u32) -> vec2<f32> {
         return sampleBuffer[i].offset;
       }
 
-      fn weight(i: u32) -> f32 {
+      fn sampleWeight(i: u32) -> f32 {
         return sampleBuffer[i].weight;
       }
 
@@ -262,7 +268,7 @@
           if (i >= u32(uniforms.numSamples)) {
             break;
           }
-          let offset = sample(i) * rmax;
+          let offset = sampleOffset(i) * rmax;
           let uv = baseUV + offset;
 
           // sample RSM
@@ -276,8 +282,8 @@
           let factor1  = max(dot(np, dir), 0.0);
           let factor2  = max(dot(n, -dir), 0.0);
 
-          indirect += flux * factor1 * factor2 * weight(i) / norm4;
-          weight_sum += weight(i);
+          indirect += flux * factor1 * factor2 * sampleWeight(i) / norm4;
+          weight_sum += sampleWeight(i);
         }
         return indirect / weight_sum;
       }
@@ -562,11 +568,11 @@
         return vec2f(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
       }
       
-      fn sample(i: u32) -> vec2<f32> {
+      fn sampleOffset(i: u32) -> vec2<f32> {
         return sampleBuffer[i].offset;
       }
 
-      fn weight(i: u32) -> f32 {
+      fn sampleWeight(i: u32) -> f32 {
         return sampleBuffer[i].weight;
       }
 
@@ -583,7 +589,7 @@
           if (i >= u32(uniforms.numSamples)) {
             break;
           }
-          let offset = sample(i) * rmax;
+          let offset = sampleOffset(i) * rmax;
           let uv = baseUV + offset;
 
           // sample RSM
@@ -592,13 +598,13 @@
           let flux = textureLoad(shadowFluxTexture, vec2i(uv * shadowMapRes), 0).xyz;
 
           let dir = (x - xp) / 560.0; // world positions in [0,1] otherwise the norm makes everything too small
-          let norm4 = max(dot(dir, dir) * dot(dir, dir), 0.001);
+          let norm4 = max(dot(dir, dir) * dot(dir, dir), 0.00001);
 
           let factor1  = max(dot(np, dir), 0.0);
           let factor2  = max(dot(n, -dir), 0.0);
 
-          indirect += flux * factor1 * factor2 * weight(i) / norm4;
-          weight_sum += weight(i);
+          indirect += flux * factor1 * factor2 * sampleWeight(i) / norm4;
+          weight_sum += sampleWeight(i);
         }
         return indirect / weight_sum;
       }
@@ -1285,7 +1291,7 @@
             GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
           ),
           
-          uvBuffer: createGPUBuffer(
+          uvBuffer: createGPUBuffer( // I don't use that
             GPUApp.device,
             mesh.uvs,
             GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
