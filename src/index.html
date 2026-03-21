@@ -72,9 +72,10 @@
           - When the interpolation scheme is on, you can also toggle a mode to visualize the zones where interpolation fails in red. <br>
           - You can toggle the <strong>animation</strong> to move the lights to see the different colors of the walls reflecting on the main object. <br><br>
           <strong style="font-size:30px;">Report</strong><br><br>
-          The Reflective Shadow Maps paper by Dachsbacher and Stamminger described a method to roughly approximate one-bounce diffuse indirect lighting in a scene. Its main appeal is that it's efficient and pretty simple to understand and implement, but it's also limited in quality and flexibility which is to be expected from a 20 year-old paper.<br>
+          The Reflective Shadow Maps paper by Dachsbacher and Stamminger described a method to roughly approximate one-bounce diffuse indirect lighting in a scene. Its main appeal is that it's efficient and pretty simple to understand and implement, but it's also limited in quality, which is to be expected from a 20 year-old paper.<br>
           The method consists in rendering the scene from the light's perspective and storing in multiple textures the depth, position, normal and flux of the visible points. Then, when rendering from the camera's perspective, we can sample these textures to get an approximation of the incoming radiance at a point by summing the contribution of multiple samples around the point from the reflective shadow map, considering them as virtual point lights. The reasoning is that, if a point contributes to the indirect lighting of another point, they are likely to be pretty close in world space (and we generally assume that two points are close in world space if they are close in light space).<br>
-          They also describe an interpolation scheme that makes it possible to reach real-time performance, but I'll explain it later as it's not the key contribution of the paper.<br><br>
+          They also describe an interpolation scheme that makes it possible to reach real-time performance, but I'll explain it later as it's not the key contribution of the paper.<br>
+          Note that this paper is old (2005) so it's probably deprecated today, but it's a great way for me to work with notions such as textures on WebGPU, and upgrade my current knowledge and handling skills of shadow mapping.<br><br>
           <strong style="font-size:20px;"><em>I/ Shadow Map</em></strong><br><br>
           I will start here since, as we didn't have a shadow mapping assignment, I had to implement this basic technique from scratch before implementing anything from the paper. Besides, everything after this step will be easier if we create a scalable structure for shadow mapping in WebGPU.<br>
           I started with the most basic rasterizer we made to make my life easier at first. From there, the main contribution is to add another render pass from the light's point of view (hence using the light's view and projection matrices instead of the camera's) and gathering a depth texture using the depth stencil attachment. This will give us a <em>texture_depth_2d</em> once sent to the GPU for the main render pass. This texture will not be linear in depth, but rather in clip space which forces us to use a <em>sampler_comparison</em> object to use it for shadow testing in the main pass.<br>
@@ -89,26 +90,27 @@
       <p style="font-size:18px">
         <strong style="font-size:20px;"><em>II/ Reflective Shadow Map</em></strong><br><br>
         Now that our classic shadow map is implemented, we can move on to the actual contribution of the paper. The idea is to store 3 new textures in addition to the depth : a position texture, a normal texture and a flux texture. First, let's understand why we do that. The depth texture is not enough to compute the indirect illumination because we also need to know the normal and the flux of the points visible from the light to be able to compute their contribution as virtual point lights. The position texture is not strictly necessary since we can get the world position from the depth, but it makes it easier and more efficient to just store it directly. The flux texture is basically the amount of light that is emitted from the point visible from the light.<br>
-        To collect these 3 new textures, we need to bind them as color attachments to our shadow pass and output the corresponding values in the fragment shader of this pipeline (note that we could do the same for the depth texture instead of using the depth stencil). The position and normal textures are straight-forward, simply output the world position and normal of the fragment rendered in the shadow pass. The flux texture is a bit more tricky especially because the paper is pretty vague about its computation. I ended up just using the reflection coefficient, which you can control to visualize how it impacts the result, multiplied by the color of the fragment, cut off by the angle between the light direction and the normal to only have flux for surfaces facing the light. This is surely not physically accurate or maybe even what they did in the paper but it yields a similar texture and feels reasonable to me. The cut off especially is a stretch from the paper since it's clearly not what they did but I figured it was more logical for a spot light since surfaces outside of the cone angle shouldn't reflect any light.<br>
+        To collect these 3 new textures, we need to bind them as color attachments to our shadow pass and output the corresponding values in the fragment shader of this pipeline (note that we could do the same for the depth texture instead of using the depth stencil). The position and normal textures are straight-forward, simply output the world position and normal of the fragment rendered in the shadow pass. The flux texture is a bit more tricky especially because the paper is pretty vague about its computation. I ended up just using the reflection coefficient, which you can control to visualize how it impacts the result, multiplied by the color of the fragment, cut off by the angle between the light direction and the normal to only have flux for surfaces facing the light. This is surely not physically accurate or maybe even what they did in the paper but it yields a similar texture and feels reasonable to me. The cut off especially is a stretch from the paper since it's clearly not what they did but I figured it was more logical for a spot light since surfaces outside of the cone angle shouldn't reflect any direct light (as we only simulate one-bounce indirect lighting).<br>
         We can now send these textures to the main pass as <em>texture_2d</em> objects and sample them to contribute to the indirect illumination with the paper's formula for irradiance, which is the flux times factors that represent how much the normals of the two pixels face each other, which is the natural way to think about this diffuse kind of reflection. This is the <em>computeIndirect</em> function's main loop in the shader code. <br><br>
         <strong style="font-size:20px;"><em>III/ Sampling</em></strong><br><br>
         Even though the sampling principle seems pretty simple, it is not completely trivial to implement. What we have to do is, for a pixel in the light's viewpoint, to sum the contributions of surrounding pixels to get a good approximation of the incoming radiance at this point. But we can't add every single pixel's contribution as it would be way too expensive. So instead, we generate two random floats between 0 and 1, each corresponding to an offset in polar coordinates. We then sum the contributions and weigh them by the square of the first random variable. But we can't do randomization on the GPU, so we have to pre-generate a list of random samples on the CPU and send it to the GPU as a storage buffer. In my code, I created 600 of them. This array contain the offsets that we randomly generated (between -1 and 1), which will be multiplied by the sample range and added to the UV coordinate to get the position of the sampled pixel in the 512x512 texture, and their corresponding weights. Then, in the shader, we just have to loop through these samples and sum their contribution to get the final indirect illumination. And now we have the full <em>computeIndirect</em> function implemented. <br>
       </p>
       <div style="display:flex; align-items:center; justify-content:right">
         <p style="margin-right:20px; font-size:18px;">
-          Here is the result with 400 samples and a sample range of 160. Note that the number 400 was advertised by the paper to be the minimum for acceptable quality, but I found that 200 was enough to have a good approximation while still being pretty fast in this scene. As for the sample range, I just tested several values and found that 160 yielded the best result for this scene in my opinion, but no information was given in the paper about this. We can indeed see what the paper describes and shows : the colors of the walls reflecting on the dragon inside of the box. Do not worry about the clearer part of the red wall behind, that's because the light goes through the wall from behind so it receives indirect illumination because its position is visible from the light even though it's backface-culled. If the light was in the box this wouldn't appear. This is simply the best set of spot light parameters I found for the scene to look good.
+          Here is the result with 400 samples and a sample range of 160. The number 400 was advertised by the paper to be the minimum for acceptable quality, but I found that 200 was enough to have a good approximation while still being pretty fast in this scene, especially with a bad GPU. As for the sample range, I just tested several values and found that 160 yielded the best result for this scene in my opinion, but no information was given in the paper about this. We can indeed see what the paper describes and shows : the colors of the walls reflecting on the dragon inside of the box. Do not worry about the clearer part of the red wall behind, that's because the light goes through the wall from behind so it receives indirect illumination because its position is visible from the light even though it's backface-culled. Same for the roof. If the light was in the box this wouldn't appear. This is simply because for the shadow pass to work well, the light needs to see the whole scene, and if it's inside the box it misses some corners and we lose the point of the paper. We could implement backface culling in the sampling part but this would not be an issue in a real scene.
         </p>
         <img src="../imgs/reflective_shadow_map_result.png" style="width:400px; margin-left:20px; margin-top:10px;">
       </div><br>
       <p style="font-size:18px">
         <strong style="font-size:20px;"><em>IV/ Interpolation Scheme</em></strong><br><br>
-        The issue of our method is that, even with the sampling scheme, it is still pretty expensive. With 400 samples and my Intel Iris Xe, the frame rate drops below 10 fps. Luckily, the paper describes an interpolation scheme to avoid looping over all the samples for every pixel, which is the heavy operation. The idea is to compute the indirect illumination just as before, but for a low-resolution version of the final image, 256x192 in my case, and then render each fragment in the full resolution image by interpolating the indirect illumination from the 4 surrounding samples in the low-res version. To do that, I created another render pass after the shadow pass that renders the scene from the camera's perspective but only outputs the indirect illumination in a low resolution texture. Then, in the main render pass, I sample this low-res texture and interpolate the indirect illumination for each fragment except those whose normal and world position vary too much from at least 2 of the 4 surrounding samples, in which case I compute the indirect illumination the old way. This is the <em>interpolateIndirect</em> function in the shader code, which returns the interpolated value for the indirect illumination, or a vector full of -1 if the interpolation fails.<br><br>
+        The issue of our method is that, even with the sampling scheme, it is still pretty expensive. With 400 samples and my Intel Iris Xe, the frame rate drops below 10 fps. Luckily, the paper describes an interpolation scheme to avoid looping over all the samples for every pixel, which is the heavy operation. The idea is to compute the indirect illumination just as before, but for a low-resolution version of the final image, 256x192 in my case, and then render each fragment in the full resolution image by interpolating the indirect illumination from the 4 surrounding samples in the low-res version. To do that, I created another render pass after the shadow pass that renders the scene from the camera's perspective but only outputs the indirect illumination in a low resolution texture, as well as low resolution textures for normals and world positions as advised from the paper for easier lookup for what follows. Then, in the main render pass, I sample this low-res texture and interpolate the indirect illumination for each fragment except those whose normal and world position vary too much from at least 2 of the 4 surrounding samples, in which case I compute the indirect illumination the old way. This is the <em>interpolateIndirect</em> function in the shader code, which returns the interpolated value for the indirect illumination, or a vector full of -1 if the interpolation fails.<br><br>
       </p>
       <div style="display:flex; align-items:center; justify-content:right">
         <img src="../imgs/interpolation_result.png" style="width:400px; margin-right:20px; margin-top:10px;">
         <p style="font-size:18px;">
-          And the result is the scene you can interact with at the top of this page. It runs pretty smoothly at 400 samples, even with the dragon which is about 14K triangles while on my laptop it was laggy even with the basic cornell box of the assignments without interpolation. Note that with a good GPU the interpolation might not be necessary to reach interactive performance.<br>
-          You can see that there is no visible loss of quality when keeping 160 for the sample range and 400 for the sample number.
+          And the result is the scene you can interact with at the top of this page. It runs pretty smoothly at 400 samples, even with the dragon which is about 14K triangles while on my laptop it was laggy even with the basic cornell box of the assignments without interpolation. You can see that there is no visible loss of quality when keeping 160 for the sample range and 400 for the sample number.<br>
+          Note that even with today's GPUs the interpolation might be necessary to reach interactive performance, as I cannot run 600 samples on my desktop computer (GTX 1660 so fairly old but still pretty functional) with no interpolation while maintaining an interactive framerate, especially when animating the scene. So in dynamic and more heavy scenes this would be very hard to run without interpolation.
+          
         </p>
       </div><br>
       <div style="display:flex; align-items:center; justify-content:right">
@@ -142,7 +144,7 @@
         shadowMapRes : vec2<f32>,
       };
 
-      struct Sample {
+      struct Sample { // Sample object for the indirect illumination sampling
         offset: vec2<f32>,
         weight: f32,
         _pad: f32,
@@ -150,6 +152,8 @@
       
       @group(0) @binding(0)
       var<uniform> uniforms : Uniforms;
+
+      // Shadow map textures
 
       @group(0) @binding(1)
       var shadowDepthTexture : texture_depth_2d;
@@ -163,11 +167,17 @@
       @group(0) @binding(4)
       var shadowFluxTexture : texture_2d<f32>;
 
+      // Sampler for the depth texture
+
       @group(0) @binding(5)
       var shadowSampler : sampler_comparison;
 
+      // Buffer for the samples used in the indirect illumination computation
+
       @group(0) @binding(6)
       var<storage, read> sampleBuffer : array<Sample>;
+
+      // Low resolution textures for interpolation
 
       @group(0) @binding(7)
       var lowResIlluminationTexture : texture_2d<f32>;
@@ -193,7 +203,9 @@
         @location(4) shadowPos: vec4f,
       };
 
-      const MAX_SAMPLE_COUNT = 600u; // because it's the number of samples we created
+      const MAX_SAMPLE_COUNT = 600u; // it's the number of samples we created
+
+      // Thresholds for the interpolation scheme
       const NORMAL_THRESHOLD = 0.9;
       const DISTANCE_THRESHOLD = 0.25;
 
@@ -270,11 +282,15 @@
           }
           let offset = sampleOffset(i) * rmax;
           let uv = baseUV + offset;
+          let intUV = vec2i(uv * shadowMapRes);
 
-          // sample RSM
-          let xp = textureLoad(shadowPositionTexture, vec2i(uv * shadowMapRes), 0).xyz;
-          let np = textureLoad(shadowNormalTexture, vec2i(uv * shadowMapRes), 0).xyz;
-          let flux = textureLoad(shadowFluxTexture, vec2i(uv * shadowMapRes), 0).xyz;
+          // Sample the position, normal and flux from the shadow map at the corresponding UV coordinate
+          let xp = textureLoad(shadowPositionTexture, intUV, 0).xyz;
+          let np = textureLoad(shadowNormalTexture, intUV, 0).xyz;
+          var flux = textureLoad(shadowFluxTexture, intUV, 0).xyz;
+          if (intUV.x < 0 || intUV.x >= i32(shadowMapRes.x) || intUV.y < 0 || intUV.y >= i32(shadowMapRes.y)) {
+            flux = vec3<f32>(0.0); // if the sample is out of bounds we consider it doesn't bring any contribution
+          }
 
           let dir = (x - xp) / 560.0; // world positions in [0,1] otherwise the norm makes everything too small
           let norm4 = max(dot(dir, dir) * dot(dir, dir), 0.00001);
@@ -282,6 +298,7 @@
           let factor1  = max(dot(np, dir), 0.0);
           let factor2  = max(dot(n, -dir), 0.0);
 
+          // Contribution of this sample to the indirect illumination
           indirect += flux * factor1 * factor2 * sampleWeight(i) / norm4;
           weight_sum += sampleWeight(i);
         }
@@ -298,14 +315,22 @@
         var weight_sum = 0.0;
         var validSamples = 0u;
 
+        // We loop through the 4 closest pixels in the low resolution texture
         for (var i: u32 = 0u; i < 2u; i++) {
           for (var j: u32 = 0u; j < 2u; j++) {
             let offset = vec2f(f32(i), f32(j));
-            let sampleNormal = textureLoad(lowResNormalTexture, vec2i(base + offset), 0).xyz;
-            let samplePosition = textureLoad(lowResPositionTexture, vec2i(base + offset), 0).xyz;
+            let intUV = vec2i(base + offset);
 
+            let sampleNormal = textureLoad(lowResNormalTexture, intUV, 0).xyz;
+            let samplePosition = textureLoad(lowResPositionTexture, intUV, 0).xyz;
+            if (intUV.x < 0 || intUV.x >= i32(lowResSize.x) || intUV.y < 0 || intUV.y >= i32(lowResSize.y)) {
+              continue; // if the sample is out of bounds we skip it
+            }
+
+            // We check if the normal and position of the sample is not too different from the one of the current fragment
             if (dot(sampleNormal, n) > NORMAL_THRESHOLD && length(samplePosition - x)/560.0 < DISTANCE_THRESHOLD) {
-              let sampleIllumination = textureLoad(lowResIlluminationTexture, vec2i(base + offset), 0).xyz;
+              // In this case this sample contributes to the interpolation, weighing by the distance to the fragment in the low resolution texture
+              let sampleIllumination = textureLoad(lowResIlluminationTexture, intUV, 0).xyz;
               let w = (1.0 - dx.x) * (1.0 - dx.y);
               inter += w * sampleIllumination;
               weight_sum += w;
@@ -313,12 +338,13 @@
             }
           }
         }
-        if (validSamples > 3u && weight_sum > 0.0) {
+        if (validSamples > 3u && weight_sum > 0.0) { // We consider the interpolation valid if at least 3 of the 4 surrounding pixels have similar normals and positions
           return inter / weight_sum;
         } else {
           return vec3<f32>(-1.0);
         }
       }
+      
       //-----------------------------------------------------------------------
       // Rasterization shaders 
       //-----------------------------------------------------------------------
@@ -337,28 +363,26 @@
       @fragment
         fn rasterFragmentMain(input: RasterVertexOutput) -> @location(0) vec4f {
           var homogeneousCoords = input.shadowPos.xyz / input.shadowPos.w;
-          var projCoords = vec3f(homogeneousCoords.x*0.5+0.5, homogeneousCoords.y*0.5+0.5, homogeneousCoords.z);
+          var projCoords = vec3f(homogeneousCoords.x * 0.5 + 0.5, -homogeneousCoords.y*0.5 + 0.5, homogeneousCoords.z); // again, y flipped
           var position = input.position;
           var normal = normalize (input.normal);
           var baseColor = input.color;
-          var shadow = textureSampleCompare (shadowDepthTexture, shadowSampler, vec2f(projCoords.x, 1.0 - projCoords.y), projCoords.z - 0.00003);
+          var shadow = textureSampleCompare (shadowDepthTexture, shadowSampler, vec2f(projCoords.x, projCoords.y), projCoords.z - 0.00003);
           var colorResponse = shade(position, normal, baseColor, shadow);
-          if (uniforms.interpolate > 0.5) {
+          if (uniforms.interpolate > 0.5) { // Interpolation scheme is used
             var baseUV = worldToCameraUV(position);
             var interpolationAttempt = interpolateIndirect(position, normal, baseUV);
-            if (interpolationAttempt.x >= 0.0) { // it can't be negative if it's valid since it's supposed to be a color
+            if (interpolationAttempt.x >= 0.0) { // it can't be negative if it's valid since it's supposed to be a color, so we made a negative to mean that the interpolation is invalid
               colorResponse += interpolationAttempt;
             }
+            else if (uniforms.interpolationDebug > 0.5) {
+              colorResponse = vec3f(1.0, 0.0, 0.0);
+            }
             else {
-              if (uniforms.interpolationDebug > 0.5) {
-                colorResponse = vec3f(1.0, 0.0, 0.0);
-              }
-              else {
-                colorResponse += computeIndirect(position, normal) * baseColor / 3.14159;
-              }
+              colorResponse += computeIndirect(position, normal) * baseColor / 3.14159;
             }
           }
-          else {
+          else { // No interpolation, we compute the indirect illumination the old way
             colorResponse += computeIndirect(position, normal) * baseColor / 3.14159;
           }
           return vec4f (colorResponse, 1.0);
@@ -415,7 +439,7 @@
           output.normal = vec4f (normalize (input.normal.xyz), 1.0);
           var wi = normalize(uniforms.lightPosition - input.position.xyz);
           var angleCos = dot(-wi, normalize(uniforms.lightDirection));
-          var cutOff = cos(uniforms.lightAngle);
+          var cutOff = cos(uniforms.lightAngle); // Points outside the spot light cone shouldn't emit any flux since they don't receive any light
           var emittedFlux = 0.0;
           if (angleCos > cutOff) {
             emittedFlux = angleCos;
@@ -445,9 +469,6 @@
       @group(0) @binding(4)
       var shadowFluxTexture : texture_2d<f32>;
 
-      @group(0) @binding(5)
-      var lowResNormalTexture : texture_2d<f32>;
-
       struct DebugVertexOutput {
         @builtin(position) builtInPos : vec4f,
         @location(0) uv: vec2f,
@@ -455,6 +476,7 @@
 
       @vertex
         fn debugVertexMain(@builtin(vertex_index) vertexIndex: u32) -> DebugVertexOutput {
+          // We render a full screen quad and sample the corresponding texture in the fragment shader based on the debug view selected
           const screenPos = array<vec2<f32>, 6>(
               vec2f(-1.0, -1.0),
               vec2f( 1.0, -1.0),
@@ -464,6 +486,7 @@
               vec2f( 1.0,  1.0),
           );
 
+          // The UV coordinates are the same as the screen position but remapped from [-1, 1] to [0, 1]
           var uv = array<vec2f, 6>(
             vec2f(0.0, 0.0),
             vec2f(1.0, 0.0),
@@ -495,11 +518,11 @@
             color = vec4f(vec3f(normalized), 1.0);
           } else if (uniforms.debugView == 2u) { 
             let texture = textureLoad (shadowPositionTexture, vec2i(uvFlipped * vec2f(textureDimensions(shadowPositionTexture))), 0);
-            let normalized = texture.xyz / vec3f(560.0, 560.0, 560.0); // I need to find a better, generalized way to map to [0, 1]
+            let normalized = texture.xyz / vec3f(560.0, 560.0, 560.0); // Doesn't look as good if we keep real world coordinates
             color = vec4f(normalized, 1.0);
           } else if (uniforms.debugView == 3u) {
             let texture = textureLoad (shadowNormalTexture, vec2i(uvFlipped * vec2f(textureDimensions(shadowNormalTexture))), 0);
-            let normalized = 0.5 * texture.xyz + vec3f(0.5, 0.5, 0.5); // [-1, 1] -> [0, 1]
+            let normalized = 0.5 * texture.xyz + vec3f(0.5, 0.5, 0.5); // [-1, 1] -> [0, 1] otherwise we see a lot of black stuff (color components below 0 are clamped to 0 and that makes everything black)
             color = vec4f(normalized, 1.0);
           } else if (uniforms.debugView == 4u) {
             color = textureLoad (shadowFluxTexture, vec2i(uvFlipped * vec2f(textureDimensions(shadowFluxTexture))), 0);
@@ -508,6 +531,8 @@
         }
     </script>
     <script type="x-shader/wgsl" id="illumination-shaders">
+      // This is essentially the same thing as the main shader, with only indirect illumination computation, and it will be used on a lower-resolution render target
+
       struct Uniforms {
         lightMVP : mat4x4<f32>,
         modelMat : mat4x4<f32>,
@@ -576,7 +601,7 @@
         return sampleBuffer[i].weight;
       }
 
-      const MAX_SAMPLE_COUNT = 600u; // because it's the number of samples we created
+      const MAX_SAMPLE_COUNT = 600u;
 
       fn computeIndirect(x: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         var indirect = vec3<f32>(0.0);
@@ -591,13 +616,16 @@
           }
           let offset = sampleOffset(i) * rmax;
           let uv = baseUV + offset;
+          let intUV = vec2i(uv * shadowMapRes);
 
-          // sample RSM
-          let xp = textureLoad(shadowPositionTexture, vec2i(uv * shadowMapRes), 0).xyz;
-          let np = textureLoad(shadowNormalTexture, vec2i(uv * shadowMapRes), 0).xyz;
-          let flux = textureLoad(shadowFluxTexture, vec2i(uv * shadowMapRes), 0).xyz;
+          let xp = textureLoad(shadowPositionTexture, intUV, 0).xyz;
+          let np = textureLoad(shadowNormalTexture, intUV, 0).xyz;
+          var flux = textureLoad(shadowFluxTexture, intUV, 0).xyz;
+          if (intUV.x < 0 || intUV.x >= i32(shadowMapRes.x) || intUV.y < 0 || intUV.y >= i32(shadowMapRes.y)) {
+            flux = vec3<f32>(0.0);
+          }
 
-          let dir = (x - xp) / 560.0; // world positions in [0,1] otherwise the norm makes everything too small
+          let dir = (x - xp) / 560.0;
           let norm4 = max(dot(dir, dir) * dot(dir, dir), 0.00001);
 
           let factor1  = max(dot(np, dir), 0.0);
@@ -1330,6 +1358,8 @@
         ];
       }
 
+      // We create the same sample structure as in the main shader
+      // It contains the offset to the current pixel, and the corresponding weight of the sample (see the paper), plus a pad for alignment
       function randomize_samples(sample_count) {
         const samples = new Float32Array(sample_count * 4);
         for (let i = 0; i < sample_count; ++i) {
@@ -1348,6 +1378,7 @@
         return samples;
       }
 
+      // These samples will be sent through a storage buffer
       function createSampleBuffer(GPUApp) {
         const samples = randomize_samples(600); //  we'll create more than 400 for testing
         return createGPUBuffer(
@@ -1682,7 +1713,7 @@
           usage: GPUTextureUsage.RENDER_ATTACHMENT,
         });
 
-        // Texture used for the shadow map
+        // Textures used for the shadow map
         GPUApp.shadowDepthTexture = GPUApp.device.createTexture({
           size: [shadowMapWidth, shadowMapHeight],
           format: "depth32float",
@@ -1710,6 +1741,7 @@
         const lowResWidth = Math.floor(GPUApp.canvas.width / 4);
         const lowResHeight = Math.floor(GPUApp.canvas.height / 4);
 
+        // Low-resolution textures used for the interpolation scheme for indirect illumination
         GPUApp.lowResIlluminationTexture = GPUApp.device.createTexture({
           size: [lowResWidth, lowResHeight],
           format: "rgba16float",
@@ -1866,7 +1898,7 @@
         scene.time += 1.0;
         const angle = scene.time/40.0;
         scene.lightSource.position = [700.0*Math.cos (angle) + 280.0, 700.0, 700.0*Math.sin (angle) + 280.0];
-        lookAt(scene.lightSource.lightViewMat, scene.lightSource.position, scene.camera.target, scene.camera.up);
+        lookAt(scene.lightSource.lightViewMat, scene.lightSource.position, [280.0, 280.0, 280.0], scene.camera.up);
       }
 
       function updateUniforms(GPUApp, scene) {
@@ -1882,9 +1914,9 @@
         GPUApp.uniformData.set(scene.lightSource.color, 68);
         GPUApp.uniformData[71] = 1.0; // pad
         scene.lightSource.lightDirection = [
-          scene.camera.target[0] - scene.lightSource.position[0],
-          scene.camera.target[1] - scene.lightSource.position[1],
-          scene.camera.target[2] - scene.lightSource.position[2]
+          280.0 - scene.lightSource.position[0],
+          280.0 - scene.lightSource.position[1],
+          280.0 - scene.lightSource.position[2]
         ];
         GPUApp.uniformData.set(scene.lightSource.lightDirection, 72);
         GPUApp.uniformData[75] = scene.lightSource.lightAngle;
@@ -1930,7 +1962,9 @@
         );
       }
 
-      function updateUniformsForDebug(GPUApp, debugViewInt) {
+      function updateUniformsForDebug(GPUApp) {
+        const debugView = document.getElementById("debugSelect").value;
+        const debugViewInt = debugView == "none" ? 0 : debugView == "depth" ? 1 : debugView == "position" ? 2 : debugView == "normal" ? 3 : 4;
         GPUApp.uniformDataForDebug[0] = debugViewInt;
         GPUApp.device.queue.writeBuffer(
           GPUApp.uniformBufferForDebug,
@@ -1968,10 +2002,12 @@
           animate(scene);
         const debugView = document.getElementById("debugSelect").value;
         updateUniforms(GPUApp, scene);
-        updateUniformsForDebug(GPUApp, debugView == "none" ? 0 : debugView == "depth" ? 1 : debugView == "position" ? 2 : debugView == "normal" ? 3 : 4);
+        updateUniformsForDebug(GPUApp);
         updateUniformsForShadow(GPUApp, scene);
         updateUniformsForIllumination(GPUApp, scene);
         const encoder = GPUApp.device.createCommandEncoder();
+
+        // Shadow pass to generate the shadow maps
         const shadowPass = encoder.beginRenderPass({
           label: "Shadow map generation pass",
           colorAttachments: [
@@ -2010,46 +2046,46 @@
         shadowPass.drawIndexed(scene.mesh.indices.length);
         shadowPass.end();
         
-        // Low res pass for indirect illumination
-        const illuminationPass = encoder.beginRenderPass({
-          label: "Indirect illumination pass",
-          colorAttachments: [
-          {
-            view: GPUApp.lowResIlluminationTexture.createView(),
-            loadOp: "clear",
-            clearValue: { r: 0, g: 0, b: 0, a: 1 },
-            storeOp: "store",
-          },
-          {
-            view: GPUApp.lowResNormalTexture.createView(),
-            loadOp: "clear",
-            clearValue: { r: 0, g: 0, b: 0, a: 1 },
-            storeOp: "store",
-          },
-          {
-            view: GPUApp.lowResPositionTexture.createView(),
-            loadOp: "clear",
-            clearValue: { r: 0, g: 0, b: 0, a: 1 },
-            storeOp: "store",
-          }
-        ],
-        depthStencilAttachment: {
-          view: GPUApp.lowResDepthTexture.createView(),
-          depthClearValue: 1.0,
-          depthLoadOp: "clear",
-          depthStoreOp: "store",
-        },
-        });
-        illuminationPass.setPipeline(GPUApp.illuminationPipeline);
-        illuminationPass.setBindGroup(0, GPUApp.bindGroupForIllumination);
-        illuminationPass.setVertexBuffer(0, GPUApp.meshBuffers.positionBuffer);
-        illuminationPass.setVertexBuffer(1, GPUApp.meshBuffers.normalBuffer);
-        illuminationPass.setVertexBuffer(2, GPUApp.meshBuffers.colorBuffer);
-        illuminationPass.setIndexBuffer(GPUApp.meshBuffers.indexBuffer, GPUApp.meshBuffers.indexFormat);
-        illuminationPass.drawIndexed(scene.mesh.indices.length);
-        illuminationPass.end();
-
         if (debugView == "none") {
+          // Low res pass for indirect illumination
+          const illuminationPass = encoder.beginRenderPass({
+            label: "Indirect illumination pass",
+            colorAttachments: [
+            {
+              view: GPUApp.lowResIlluminationTexture.createView(),
+              loadOp: "clear",
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              storeOp: "store",
+            },
+            {
+              view: GPUApp.lowResNormalTexture.createView(),
+              loadOp: "clear",
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              storeOp: "store",
+            },
+            {
+              view: GPUApp.lowResPositionTexture.createView(),
+              loadOp: "clear",
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              storeOp: "store",
+            }
+          ],
+          depthStencilAttachment: {
+            view: GPUApp.lowResDepthTexture.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+          });
+          illuminationPass.setPipeline(GPUApp.illuminationPipeline);
+          illuminationPass.setBindGroup(0, GPUApp.bindGroupForIllumination);
+          illuminationPass.setVertexBuffer(0, GPUApp.meshBuffers.positionBuffer);
+          illuminationPass.setVertexBuffer(1, GPUApp.meshBuffers.normalBuffer);
+          illuminationPass.setVertexBuffer(2, GPUApp.meshBuffers.colorBuffer);
+          illuminationPass.setIndexBuffer(GPUApp.meshBuffers.indexBuffer, GPUApp.meshBuffers.indexFormat);
+          illuminationPass.drawIndexed(scene.mesh.indices.length);
+          illuminationPass.end();
+
           // Main render pass
           const renderPass = encoder.beginRenderPass({
             label: "Main rendering pass",
@@ -2077,6 +2113,7 @@
           renderPass.end();
         }
         else {
+          // Debug pass to show the shadow maps
           const debugPass = encoder.beginRenderPass({
             label: "Debug pass",
             colorAttachments: [{
