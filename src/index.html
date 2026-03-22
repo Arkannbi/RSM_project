@@ -274,7 +274,7 @@
         let baseUV = worldToLightUV(x);
         let shadowMapRes = uniforms.shadowMapRes;
         let rmax = uniforms.sampleRange / shadowMapRes.x ;
-        var weight_sum = 0.0;
+        var weight_sum = 0.000000001; // to avoid dividing by 0 (could happen with very few samples but very unlikely in general)
 
         for (var i: u32 = 0u; i < MAX_SAMPLE_COUNT; i++) {
           if (i >= u32(uniforms.numSamples)) {
@@ -285,12 +285,14 @@
           let intUV = vec2i(uv * shadowMapRes);
 
           // Sample the position, normal and flux from the shadow map at the corresponding UV coordinate
+          if (intUV.x < 0 || intUV.x >= i32(shadowMapRes.x) || intUV.y < 0 || intUV.y >= i32(shadowMapRes.y)) {
+            weight_sum += sampleWeight(i); // if the sample is out of bounds we still add its weight to the sum otherwise we're missing samples
+            // it's equivalent to adding the contribution from a black pixel
+            continue;
+          }
           let xp = textureLoad(shadowPositionTexture, intUV, 0).xyz;
           let np = textureLoad(shadowNormalTexture, intUV, 0).xyz;
-          var flux = textureLoad(shadowFluxTexture, intUV, 0).xyz;
-          if (intUV.x < 0 || intUV.x >= i32(shadowMapRes.x) || intUV.y < 0 || intUV.y >= i32(shadowMapRes.y)) {
-            flux = vec3<f32>(0.0); // if the sample is out of bounds we consider it doesn't bring any contribution
-          }
+          let flux = textureLoad(shadowFluxTexture, intUV, 0).xyz;
 
           let dir = (x - xp) / 560.0; // world positions in [0,1] otherwise the norm makes everything too small
           let norm4 = max(dot(dir, dir) * dot(dir, dir), 0.00001);
@@ -312,7 +314,7 @@
         let dx = coord - base;
         
         var inter = vec3<f32>(0.0);
-        var weight_sum = 0.0;
+        var weight_sum = 0.000000001;
         var validSamples = 0u;
 
         // We loop through the 4 closest pixels in the low resolution texture
@@ -321,11 +323,11 @@
             let offset = vec2f(f32(i), f32(j));
             let intUV = vec2i(base + offset);
 
-            let sampleNormal = textureLoad(lowResNormalTexture, intUV, 0).xyz;
-            let samplePosition = textureLoad(lowResPositionTexture, intUV, 0).xyz;
             if (intUV.x < 0 || intUV.x >= i32(lowResSize.x) || intUV.y < 0 || intUV.y >= i32(lowResSize.y)) {
               continue; // if the sample is out of bounds we skip it
             }
+            let sampleNormal = textureLoad(lowResNormalTexture, intUV, 0).xyz;
+            let samplePosition = textureLoad(lowResPositionTexture, intUV, 0).xyz;
 
             // We check if the normal and position of the sample is not too different from the one of the current fragment
             if (dot(sampleNormal, n) > NORMAL_THRESHOLD && length(samplePosition - x)/560.0 < DISTANCE_THRESHOLD) {
@@ -608,7 +610,7 @@
         let baseUV = worldToLightUV(x);
         let shadowMapRes = uniforms.shadowMapRes;
         let rmax = uniforms.sampleRange / shadowMapRes.x ;
-        var weight_sum = 0.0;
+        var weight_sum = 0.000000001;
 
         for (var i: u32 = 0u; i < MAX_SAMPLE_COUNT; i++) {
           if (i >= u32(uniforms.numSamples)) {
@@ -618,13 +620,14 @@
           let uv = baseUV + offset;
           let intUV = vec2i(uv * shadowMapRes);
 
+          if (intUV.x < 0 || intUV.x >= i32(shadowMapRes.x) || intUV.y < 0 || intUV.y >= i32(shadowMapRes.y)) {
+            weight_sum += sampleWeight(i);
+            continue;
+          }
           let xp = textureLoad(shadowPositionTexture, intUV, 0).xyz;
           let np = textureLoad(shadowNormalTexture, intUV, 0).xyz;
-          var flux = textureLoad(shadowFluxTexture, intUV, 0).xyz;
-          if (intUV.x < 0 || intUV.x >= i32(shadowMapRes.x) || intUV.y < 0 || intUV.y >= i32(shadowMapRes.y)) {
-            flux = vec3<f32>(0.0);
-          }
-
+          let flux = textureLoad(shadowFluxTexture, intUV, 0).xyz;
+          
           let dir = (x - xp) / 560.0;
           let norm4 = max(dot(dir, dir) * dot(dir, dir), 0.00001);
 
@@ -1375,6 +1378,7 @@
           samples[base + 2] = x1 * x1;
           samples[base + 3] = 0.0; // pad
         }
+        console.log("Samples created: ", samples);
         return samples;
       }
 
